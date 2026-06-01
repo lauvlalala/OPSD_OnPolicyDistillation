@@ -1,0 +1,19 @@
+tools:
+  - class_name: tools.alfworld_tool.AlfWorldTool
+    config:
+      max_steps: 50
+      data_path: ${oc.env:ALFWORLD_DATA,}
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: act
+        description: Execute an action in the household environment.
+        parameters:
+          type: object
+          properties:
+            action:
+              type: string
+              description: The action to perform (e.g., "go to desk 1", "pick up key", "look").
+          required:
+            - action
