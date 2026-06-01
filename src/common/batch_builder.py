@@ -286,10 +286,11 @@ def build_teacher_student_batch(
     apply_chat_template_kwargs: Optional[dict] = None,
     per_sample_data: Optional[dict[str, torch.Tensor]] = None,
     use_teacher_context: bool = True,
+    teacher_content_fn: Optional[callable] = None,
 ) -> Optional[DataProto]:
     """Build paired teacher/student sequences from a standard verl rollout batch.
 
-    When use_teacher_context=True (same model): teacher gets ground truth context,
+    When use_teacher_context=True (same model): teacher gets privileged context,
     student gets question only. Separate teacher/student sequences.
 
     When use_teacher_context=False (bigger teacher model): both teacher and student
@@ -303,6 +304,9 @@ def build_teacher_student_batch(
         apply_chat_template_kwargs: Kwargs for apply_chat_template (same for both).
         per_sample_data: Optional dict of {name: tensor[N]} to carry through filtering.
         use_teacher_context: If True, teacher sees ground truth. If False, same prompt for both.
+        teacher_content_fn: Optional callable(sample_index, batch) -> str. If provided, returns
+            the teacher user-message content directly (e.g. from PI templates). Overrides
+            the default _build_teacher_messages logic.
     """
     if len(batch) == 0:
         return None
@@ -346,11 +350,20 @@ def build_teacher_student_batch(
             continue
 
         if use_teacher_context:
-            gt = reward_model.get("ground_truth") if reward_model else None
-            if gt is None:
-                skipped += 1
-                continue
-            teacher_messages = _build_teacher_messages(student_messages, gt, teacher_system_prompt)
+            if teacher_content_fn is not None:
+                # Use PI template system — teacher_content_fn returns rendered content
+                teacher_content = teacher_content_fn(i, batch)
+                if teacher_content is None:
+                    skipped += 1
+                    continue
+                teacher_messages = [{"role": "user", "content": teacher_content}]
+            else:
+                # Default: inject ground_truth via _build_teacher_messages
+                gt = reward_model.get("ground_truth") if reward_model else None
+                if gt is None:
+                    skipped += 1
+                    continue
+                teacher_messages = _build_teacher_messages(student_messages, gt, teacher_system_prompt)
             teacher_prompt_ids = tokenizer.apply_chat_template(
                 teacher_messages, add_generation_prompt=True, tokenize=True, **chat_kwargs,
             )

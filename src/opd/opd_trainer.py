@@ -71,6 +71,41 @@ class OPDTrainer(RayPPOTrainer):
         self.reward_beta = opd_cfg.get("reward_beta", None)
         if self.reward_beta is not None and self.reward_beta <= 0:
             self.reward_beta = None
+
+        # New OPSD parameters
+        self.token_scope = opd_cfg.get("token_scope", "full_vocab")
+        self.temperature = opd_cfg.get("temperature", 1.0)
+        self.token_clip = opd_cfg.get("token_clip", 0.0)
+        self.topk = opd_cfg.get("topk", 64)
+        self.weight_mode = opd_cfg.get("weight_mode", "reinforce")
+        self.gate_beta = opd_cfg.get("gate_beta", 5.0)
+        self.pi_mode = opd_cfg.get("pi_mode", "none")
+        self.teacher_system_prompt = opd_cfg.get("teacher_system_prompt", None)
+        self.teacher_sync_freq = opd_cfg.get("teacher_sync_freq", 0)
+        self.teacher_ema_decay = opd_cfg.get("teacher_ema_decay", 0.0)
+
+        # Rollout PI config (SDPO-style)
+        pi_rollout = opd_cfg.get("pi_rollout", {})
+        self.pi_rollout_cfg = {
+            "success_threshold": pi_rollout.get("success_threshold", 0.5) if pi_rollout else 0.5,
+            "exclude_self": pi_rollout.get("exclude_self", True) if pi_rollout else True,
+            "remove_thinking": pi_rollout.get("remove_thinking", True) if pi_rollout else True,
+        }
+        # Feedback PI config
+        pi_feedback = opd_cfg.get("pi_feedback", {})
+        self.pi_feedback_cfg = {
+            "only_without_solution": pi_feedback.get("only_without_solution", True) if pi_feedback else True,
+        }
+        # Reprompt templates
+        self.reprompt_template = opd_cfg.get(
+            "reprompt_template", "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
+        )
+        self.solution_template = opd_cfg.get(
+            "solution_template", "\n\nCorrect solution:\n{successful_previous_attempt}\n"
+        )
+        self.feedback_template = opd_cfg.get(
+            "feedback_template", "\n\nFeedback from your earlier attempt:\n{feedback_raw}\n"
+        )
         apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
         if OmegaConf.is_config(apply_chat_template_kwargs):
             apply_chat_template_kwargs = OmegaConf.to_container(apply_chat_template_kwargs, resolve=True)
@@ -326,13 +361,23 @@ class OPDTrainer(RayPPOTrainer):
                 batch_size = len(responses)
 
                 rewards = []
-                for response, ground_truth in zip(responses, ground_truths, strict=True):
+                feedbacks = []
+                data_sources = [
+                    item.non_tensor_batch.get("data_source", "unknown") for item in batch
+                ]
+                for response, ground_truth, ds in zip(responses, ground_truths, data_sources, strict=True):
                     if ground_truth is not None:
-                        result = self.reward_fn(solution_str=response, ground_truth=ground_truth)
-                        acc = float(result.get("acc", result.get("score", 0.0))) if isinstance(result, dict) else float(result)
+                        result = self.reward_fn(solution_str=response, ground_truth=ground_truth, data_source=ds)
+                        if isinstance(result, dict):
+                            acc = float(result.get("acc", result.get("score", 0.0)))
+                            feedbacks.append(result.get("feedback", None))
+                        else:
+                            acc = float(result)
+                            feedbacks.append(None)
                         rewards.append(1.0 if acc > 0 else 0.0)
                     else:
                         rewards.append(0.0)
+                        feedbacks.append(None)
                 n_correct = sum(rewards)
                 metrics["opd/accuracy"] = n_correct / max(1, batch_size)
                 metrics["opd/batch_size"] = batch_size
@@ -347,19 +392,66 @@ class OPDTrainer(RayPPOTrainer):
                     metrics["opd/n_correct"] = int(n_correct)
 
                 train_t0 = time.time()
-                opd_batch = build_opd_batch(
-                    batch=batch,
-                    tokenizer=self.tokenizer,
-                    max_length=self.opd_max_length,
-                    apply_chat_template_kwargs=self.apply_chat_template_kwargs,
-                    sample_weights=sample_weights,
-                )
+                if self.pi_mode in ("rollout", "rollout+feedback"):
+                    from opd.pi_builder import build_pi_batch
+
+                    pi_config = {
+                        "pi_rollout": {"enable": True, **self.pi_rollout_cfg},
+                        "pi_feedback": {"enable": "feedback" in self.pi_mode, **self.pi_feedback_cfg},
+                        "reprompt_template": self.reprompt_template,
+                        "solution_template": self.solution_template,
+                        "feedback_template": self.feedback_template,
+                    }
+                    opd_batch = build_pi_batch(
+                        batch=batch,
+                        tokenizer=self.tokenizer,
+                        responses_text=responses,
+                        rewards=rewards,
+                        feedbacks=feedbacks,
+                        pi_config=pi_config,
+                        max_length=self.opd_max_length,
+                        apply_chat_template_kwargs=self.apply_chat_template_kwargs,
+                    )
+                elif self.pi_mode == "static":
+                    from common.batch_builder import build_teacher_student_batch
+                    from opd.pi_templates import render_pi
+
+                    def _teacher_content_fn(idx, b):
+                        pi_fields = b.non_tensor_batch.get("pi_fields", [None] * len(b))[idx]
+                        data_source = b.non_tensor_batch.get("data_source", ["unknown"] * len(b))[idx]
+                        if pi_fields is None:
+                            return None
+                        return render_pi(data_source, pi_fields)
+
+                    opd_batch = build_teacher_student_batch(
+                        batch=batch,
+                        tokenizer=self.tokenizer,
+                        max_length=self.opd_max_length,
+                        apply_chat_template_kwargs=self.apply_chat_template_kwargs,
+                        per_sample_data={"sample_weights": sample_weights} if sample_weights is not None else None,
+                        use_teacher_context=True,
+                        teacher_content_fn=_teacher_content_fn,
+                    )
+                else:
+                    opd_batch = build_opd_batch(
+                        batch=batch,
+                        tokenizer=self.tokenizer,
+                        max_length=self.opd_max_length,
+                        apply_chat_template_kwargs=self.apply_chat_template_kwargs,
+                        sample_weights=sample_weights,
+                    )
 
                 if opd_batch is not None:
                     opd_batch = self._pad_opd_batch_for_dispatch(opd_batch)
                     opd_batch.meta_info["opd_loss_type"] = self.loss_type
                     opd_batch.meta_info["opd_beta"] = self.beta
                     opd_batch.meta_info["opd_chunk_size"] = self.chunk_size
+                    opd_batch.meta_info["opd_token_scope"] = self.token_scope
+                    opd_batch.meta_info["opd_temperature"] = self.temperature
+                    opd_batch.meta_info["opd_token_clip"] = self.token_clip
+                    opd_batch.meta_info["opd_topk"] = self.topk
+                    opd_batch.meta_info["opd_weight_mode"] = self.weight_mode
+                    opd_batch.meta_info["opd_gate_beta"] = self.gate_beta
                     if self.reward_beta is not None:
                         opd_batch.meta_info["opd_reward_beta"] = self.reward_beta
 
@@ -372,6 +464,11 @@ class OPDTrainer(RayPPOTrainer):
                 # Reload SGLang with updated actor weights for next rollout
                 self.checkpoint_manager.update_weights()
                 metrics["timing/train_s"] = time.time() - train_t0
+
+                # EMA teacher sync (OPSD mode)
+                if self.teacher_sync_freq > 0 and self.global_steps % self.teacher_sync_freq == 0:
+                    sync_data = DataProto(meta_info={"ema_decay": self.teacher_ema_decay})
+                    self.actor_rollout_wg.sync_ref_from_actor(sync_data)
 
                 is_last = self.global_steps >= self.total_training_steps
                 is_val = self.test_freq > 0 and self.global_steps % self.test_freq == 0
