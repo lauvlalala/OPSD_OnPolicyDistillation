@@ -12,8 +12,10 @@ Training step:
 """
 
 import logging
+import math
 
 import torch
+import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl.protocol import DataProto
@@ -30,7 +32,7 @@ from verl.utils.torch_functional import entropy_from_logits_with_chunking
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
 
-from .losses import LOSS_FN_MAP, compute_teacher_token_stats
+from .losses import LOSS_FN_MAP, compute_sampled_token_loss, compute_teacher_token_stats, compute_topk_divergence_loss
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,39 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         super().__init__(config=config, role=role, **kwargs)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    def sync_ref_from_actor(self, data: DataProto) -> DataProto:
+        """Sync teacher (ref) weights from student (actor). Supports hard copy and EMA.
+
+        Args (via data.meta_info):
+            ema_decay: 0 = hard copy, >0 = EMA: ref = decay*ref + (1-decay)*actor
+        """
+        ema_decay = data.meta_info.get("ema_decay", 0.0)
+        ref_needs_offload = self.config.ref.fsdp_config.get("param_offload", False)
+
+        if ref_needs_offload:
+            load_fsdp_model_to_gpu(self.ref_module_fsdp)
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        with torch.no_grad():
+            for ref_p, actor_p in zip(
+                self.ref_module_fsdp.parameters(),
+                self.actor_module_fsdp.parameters(),
+            ):
+                if ema_decay > 0:
+                    ref_p.data.mul_(ema_decay).add_(actor_p.data, alpha=1 - ema_decay)
+                else:
+                    ref_p.data.copy_(actor_p.data)
+
+        if ref_needs_offload:
+            offload_fsdp_model_to_cpu(self.ref_module_fsdp)
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        logger.info("[OPD] sync_ref_from_actor: ema_decay=%.4f", ema_decay)
+        return DataProto()
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     def update_opd(self, data: DataProto) -> DataProto:
         """One OPD training step: divergence between teacher and student.
 
@@ -113,6 +148,12 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         loss_type = data.meta_info.get("opd_loss_type", "reverse_kl")
         beta = data.meta_info.get("opd_beta", 0.5)
         chunk_size = data.meta_info.get("opd_chunk_size", 512)
+        token_scope = data.meta_info.get("opd_token_scope", "full_vocab")
+        temperature = data.meta_info.get("opd_temperature", 1.0)
+        token_clip = data.meta_info.get("opd_token_clip", 0.0)
+        topk_k = data.meta_info.get("opd_topk", 64)
+        weight_mode = data.meta_info.get("opd_weight_mode", "reinforce")
+        gate_beta = data.meta_info.get("opd_gate_beta", 5.0)
 
         use_remove_padding = self.config.model.get("use_remove_padding", False)
         micro_batch_size = self.config.actor.get(
@@ -175,7 +216,27 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                             i, list(teacher_logits.shape))
                 _mem(f"phase1-mb{i}-after-teacher-fwd")
 
-                teacher_logits_cache.append((teacher_logits.to("cpu"), True))
+                # Cache based on token_scope for memory efficiency
+                if token_scope == "sampled_token":
+                    # Only cache (N,) teacher log-probs at actual next-token positions
+                    if use_remove_padding:
+                        target_ids = self._extract_response_target_ids_unpadded(
+                            t_input_ids, t_attention_mask, t_loss_mask
+                        )
+                    else:
+                        target_ids = self._extract_response_target_ids_padded(t_input_ids, t_loss_mask)
+                    t_lp = F.log_softmax(teacher_logits.float() / temperature, dim=-1)
+                    teacher_lp_at_target = t_lp.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+                    teacher_logits_cache.append(((teacher_lp_at_target.to("cpu"), target_ids.to("cpu")), True))
+                    del t_lp, teacher_lp_at_target, target_ids
+                elif token_scope == "topk":
+                    # Only cache (N, k) teacher top-k logits + indices
+                    topk_vals, topk_idx = teacher_logits.topk(topk_k, dim=-1)
+                    teacher_logits_cache.append(((topk_vals.to("cpu"), topk_idx.to("cpu")), True))
+                    del topk_vals, topk_idx
+                else:
+                    # full_vocab: cache entire (N, V) logits
+                    teacher_logits_cache.append((teacher_logits.to("cpu"), True))
                 del teacher_logits
                 _mem(f"phase1-mb{i}-after-cache-to-cpu")
 
@@ -203,6 +264,8 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 loss_type=loss_type, beta=beta, chunk_size=chunk_size,
                 use_remove_padding=use_remove_padding, device=device, batch_size=batch_size,
                 use_sample_weights=use_sample_weights,
+                token_scope=token_scope, temperature=temperature, token_clip=token_clip,
+                topk_k=topk_k, weight_mode=weight_mode, gate_beta=gate_beta,
             )
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -234,6 +297,12 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         device: int = 0,
         batch_size: int = 0,
         use_sample_weights: bool = False,
+        token_scope: str = "full_vocab",
+        temperature: float = 1.0,
+        token_clip: float = 0.0,
+        topk_k: int = 64,
+        weight_mode: str = "reinforce",
+        gate_beta: float = 5.0,
     ) -> dict:
         """Core OPD training with pre-computed teacher logits.
 
@@ -266,7 +335,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
             reserved = torch.cuda.memory_reserved() / (1024**3)
             logger.info("[OPD-MEM] %s: allocated=%.2f GB, reserved=%.2f GB", tag, alloc, reserved)
 
-        for i, (micro_batch, (cached_teacher_logits, is_valid)) in enumerate(
+        for i, (micro_batch, (cached_data, is_valid)) in enumerate(
             zip(micro_batches, teacher_logits_cache, strict=True)
         ):
             if not is_valid:
@@ -290,67 +359,121 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 s_loss_mask = s_loss_mask[valid_row_mask]
 
             _mem2(f"phase2-mb{i}-before-teacher-to-gpu")
-            teacher_logits = cached_teacher_logits.to(device)
-            logger.info("[OPD-MEM] phase2 micro_batch[%d]: student_ids shape=%s, cached_teacher shape=%s",
-                        i, list(s_input_ids.shape), list(teacher_logits.shape))
-            _mem2(f"phase2-mb{i}-after-teacher-to-gpu")
 
+            # Student forward (always needed)
             student_logits = forward_fn(
                 self.actor_module_fsdp, s_input_ids, s_attention_mask, s_position_ids, s_loss_mask
             )
-            logger.info("[OPD-MEM] phase2 micro_batch[%d]: student_logits shape=%s", i, list(student_logits.shape))
             _mem2(f"phase2-mb{i}-after-student-fwd")
 
-            if teacher_logits.shape[0] != student_logits.shape[0]:
-                raise RuntimeError(
-                    "Teacher and student response token counts diverged. "
-                    "This usually means prompt truncation dropped response tokens."
-                )
-            if teacher_logits.shape[0] == 0:
-                del teacher_logits
+            n_response_tokens = student_logits.shape[0]
+            if n_response_tokens == 0:
                 continue
 
             _mem2(f"phase2-mb{i}-before-loss")
 
-            # Per-sample reward weighting: compute loss per sample, weight, then average
-            mb_sample_weights = None
-            if use_sample_weights and "sample_weights" in micro_batch.batch:
-                mb_sample_weights = micro_batch.batch["sample_weights"]
-                if valid_row_mask is not None:
-                    mb_sample_weights = mb_sample_weights[valid_row_mask]
-                mb_sample_weights = mb_sample_weights.to(device)
+            # --- Compute loss based on token_scope ---
+            if token_scope == "sampled_token":
+                teacher_lp_cpu, target_ids_cpu = cached_data
+                teacher_lp = teacher_lp_cpu.to(device)
+                target_ids = target_ids_cpu.to(device)
 
-            if mb_sample_weights is not None:
-                # Compute per-sample loss using loss_mask to identify sample boundaries
-                # s_loss_mask: (n_valid_rows, seq_len), teacher/student_logits: (N_response_tokens, V)
-                # We need to map response tokens back to samples
-                per_sample_token_counts = s_loss_mask[:, 1:].sum(dim=1).long()  # tokens per sample
-                sample_losses = []
-                token_offset = 0
-                for si in range(per_sample_token_counts.shape[0]):
-                    n_tok = per_sample_token_counts[si].item()
-                    if n_tok == 0:
-                        sample_losses.append(torch.tensor(0.0, device=device))
-                        continue
-                    t_slice = teacher_logits[token_offset:token_offset + n_tok]
-                    s_slice = student_logits[token_offset:token_offset + n_tok]
-                    if loss_type == "jsd":
-                        sl, _ = loss_fn(t_slice, s_slice, beta=beta, chunk_size=chunk_size)
-                    else:
-                        sl, _ = loss_fn(t_slice, s_slice, chunk_size=chunk_size)
-                    sample_losses.append(sl)
-                    token_offset += n_tok
-                sample_losses = torch.stack(sample_losses)
-                loss = (sample_losses * mb_sample_weights).sum() / mb_sample_weights.sum()
-                n_tokens = int(per_sample_token_counts.sum().item())
-            else:
-                if loss_type == "jsd":
-                    loss, n_tokens = loss_fn(teacher_logits, student_logits, beta=beta, chunk_size=chunk_size)
+                if teacher_lp.shape[0] != n_response_tokens:
+                    raise RuntimeError("Teacher/student response token count mismatch (sampled_token)")
+
+                # Gather student log-prob at target positions (with grad)
+                student_lp = F.log_softmax(student_logits.float() / temperature, dim=-1)
+                student_lp_at_target = student_lp.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+                del student_lp
+
+                loss, n_tokens, extra_metrics = compute_sampled_token_loss(
+                    student_lp_at_target, teacher_lp,
+                    weight_mode=weight_mode, gate_beta=gate_beta,
+                )
+                del teacher_lp, target_ids, student_lp_at_target
+
+            elif token_scope == "topk":
+                topk_vals_cpu, topk_idx_cpu = cached_data
+                teacher_topk_logits = topk_vals_cpu.to(device)  # (N, k)
+                topk_idx = topk_idx_cpu.to(device)  # (N, k)
+
+                if teacher_topk_logits.shape[0] != n_response_tokens:
+                    raise RuntimeError("Teacher/student response token count mismatch (topk)")
+
+                n_tokens = n_response_tokens
+                # Gather student logits at teacher's top-k positions
+                student_topk_logits = student_logits.gather(-1, topk_idx)  # (N, k)
+                # Renormalize both over k tokens and compute divergence
+                t_lp = F.log_softmax(teacher_topk_logits.float() / temperature, dim=-1)
+                s_lp = F.log_softmax(student_topk_logits.float() / temperature, dim=-1)
+                del teacher_topk_logits, student_topk_logits, topk_idx
+
+                if loss_type == "forward_kl":
+                    div_per_vocab = F.kl_div(s_lp, t_lp, reduction="none", log_target=True)
+                elif loss_type == "reverse_kl":
+                    div_per_vocab = F.kl_div(t_lp, s_lp, reduction="none", log_target=True)
                 else:
-                    loss, n_tokens = loss_fn(teacher_logits, student_logits, chunk_size=chunk_size)
+                    # JSD on top-k
+                    log_m = torch.logsumexp(
+                        torch.stack([t_lp + math.log(beta), s_lp + math.log(1 - beta)], dim=0), dim=0
+                    )
+                    kl_t = F.kl_div(log_m, t_lp, reduction="none", log_target=True)
+                    kl_s = F.kl_div(log_m, s_lp, reduction="none", log_target=True)
+                    div_per_vocab = beta * kl_t + (1 - beta) * kl_s
+                    del log_m, kl_t, kl_s
+                del t_lp, s_lp
 
-            del teacher_logits
-            _mem2(f"phase2-mb{i}-after-loss-del-teacher")
+                if token_clip > 0:
+                    div_per_vocab = div_per_vocab.clamp(max=token_clip)
+                loss = div_per_vocab.sum(dim=-1).mean()
+                del div_per_vocab
+                extra_metrics = {}
+
+            else:
+                # full_vocab path (original behavior)
+                teacher_logits = cached_data.to(device)
+
+                if teacher_logits.shape[0] != n_response_tokens:
+                    raise RuntimeError("Teacher/student response token count mismatch (full_vocab)")
+
+                # Per-sample reward weighting
+                mb_sample_weights = None
+                if use_sample_weights and "sample_weights" in micro_batch.batch:
+                    mb_sample_weights = micro_batch.batch["sample_weights"]
+                    if valid_row_mask is not None:
+                        mb_sample_weights = mb_sample_weights[valid_row_mask]
+                    mb_sample_weights = mb_sample_weights.to(device)
+
+                # Resolve loss function and kwargs
+                loss_kwargs = {"chunk_size": chunk_size, "temperature": temperature, "token_clip": token_clip}
+                if loss_type == "jsd":
+                    loss_kwargs["beta"] = beta
+                _loss_fn = loss_fn
+
+                if mb_sample_weights is not None:
+                    per_sample_token_counts = s_loss_mask[:, 1:].sum(dim=1).long()
+                    sample_losses = []
+                    token_offset = 0
+                    for si in range(per_sample_token_counts.shape[0]):
+                        n_tok = per_sample_token_counts[si].item()
+                        if n_tok == 0:
+                            sample_losses.append(torch.tensor(0.0, device=device))
+                            continue
+                        t_slice = teacher_logits[token_offset:token_offset + n_tok]
+                        s_slice = student_logits[token_offset:token_offset + n_tok]
+                        sl, _ = _loss_fn(t_slice, s_slice, **loss_kwargs)
+                        sample_losses.append(sl)
+                        token_offset += n_tok
+                    sample_losses = torch.stack(sample_losses)
+                    loss = (sample_losses * mb_sample_weights).sum() / mb_sample_weights.sum()
+                    n_tokens = int(per_sample_token_counts.sum().item())
+                else:
+                    loss, n_tokens = _loss_fn(teacher_logits, student_logits, **loss_kwargs)
+
+                del teacher_logits
+                extra_metrics = {}
+
+            _mem2(f"phase2-mb{i}-after-loss")
 
             # Compute per-token entropy of the student policy (no grad needed)
             with torch.no_grad():

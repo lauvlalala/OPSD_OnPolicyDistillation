@@ -84,9 +84,30 @@ opd:
   #   jsd: JSD_beta(p_teacher || p_student) — balanced interpolation
   loss_type: reverse_kl
 
-  # JSD interpolation parameter (only used when loss_type=jsd)
+  # JSD interpolation parameter (used when loss_type=jsd)
   # beta=0.5 gives symmetric JSD
   beta: 0.5
+
+  # Token scope: how to compute the distillation signal
+  #   full_vocab: compare full vocabulary distributions (most accurate, most memory)
+  #   topk: compare only teacher's top-k tokens (less noise, less memory)
+  #   sampled_token: compare log-probs at the actually-generated token (least memory)
+  token_scope: full_vocab
+
+  # Top-k parameters (only used when token_scope=topk)
+  topk: 64
+
+  # Sampled-token parameters (only used when token_scope=sampled_token)
+  #   weight_mode: "reinforce" | "gated" | "weighted"
+  #   gate_beta: sigmoid temperature for gated mode
+  weight_mode: reinforce
+  gate_beta: 5.0
+
+  # Temperature: divide logits by this before softmax (1.0 = no scaling)
+  temperature: 1.0
+
+  # Token clip: clamp per-element divergence to this value (0 = no clip)
+  token_clip: 0.0
 
   # Chunk size for memory-efficient divergence computation
   # Smaller = less peak memory, larger = slightly faster
@@ -101,6 +122,34 @@ opd:
   # Large values (e.g. 10.0) = near-uniform (approaches standard OPD).
   # Requires rollout_n > 1 for meaningful differentiation.
   reward_beta: null
+
+  # --- OPSD (Self-Distillation) settings ---
+  # PI mode: how to inject privileged information into teacher prompt
+  #   none: teacher sees same input as student (standard OPD with separate teacher)
+  #   static: teacher sees ground truth from pi_fields (requires pi_fields in data)
+  #   rollout: teacher sees successful rollout from same batch (SDPO-style)
+  #   rollout+feedback: rollout PI + environment feedback from reward function
+  pi_mode: none
+  teacher_system_prompt: null
+
+  # Rollout PI: use successful rollouts as teacher's privileged information
+  pi_rollout:
+    success_threshold: 0.5  # reward >= this counts as successful
+    exclude_self: true      # don't use own response as PI
+    remove_thinking: true   # strip <think>...</think> from demonstrations
+
+  # Feedback PI: use reward function's feedback field as PI
+  pi_feedback:
+    only_without_solution: true  # only use feedback when no successful rollout exists
+
+  # Reprompt templates (for rollout/feedback PI modes)
+  reprompt_template: "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
+  solution_template: "\n\nCorrect solution:\n{successful_previous_attempt}\n"
+  feedback_template: "\n\nFeedback from your earlier attempt:\n{feedback_raw}\n"
+
+  # Teacher sync: periodically update teacher (ref) from student (actor)
+  teacher_sync_freq: 0
+  teacher_ema_decay: 0.0
 
 # ---------- Reward (validation only, no RM) ----------
 reward:

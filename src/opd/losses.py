@@ -21,6 +21,8 @@ def compute_reverse_kl_loss(
     teacher_logits: torch.Tensor,
     student_logits: torch.Tensor,
     chunk_size: int = 512,
+    temperature: float = 1.0,
+    token_clip: float = 0.0,
 ) -> tuple[torch.Tensor, int]:
     """Chunk-wise reverse KL: KL(p_student || p_teacher).
 
@@ -33,6 +35,8 @@ def compute_reverse_kl_loss(
         teacher_logits: (N, V) from frozen teacher (no grad).
         student_logits: (N, V) from trainable student (with grad).
         chunk_size: Tokens per chunk to bound peak memory.
+        temperature: Divide logits by this before softmax (1.0 = no scaling).
+        token_clip: Clamp per-element divergence to this value (0 = no clip).
 
     Returns:
         (loss, n_tokens) — scalar mean loss and token count.
@@ -51,15 +55,19 @@ def compute_reverse_kl_loss(
         start = i * chunk_size
         end = start + t_chunk.shape[0]
 
-        t_lp = F.log_softmax(t_chunk.float(), dim=-1)
-        s_lp = F.log_softmax(student_logits[start:end].float(), dim=-1)
+        t_lp = F.log_softmax(t_chunk.float() / temperature, dim=-1)
+        s_lp = F.log_softmax(student_logits[start:end].float() / temperature, dim=-1)
         del t_chunk
         teacher_chunks[i] = None
 
         # F.kl_div(input=log_p_T, target=log_p_S, log_target=True)
         # computes: exp(target) * (target - input) = p_S * (log_p_S - log_p_T)
-        kl_chunk = F.kl_div(t_lp, s_lp, reduction="none", log_target=True).sum(dim=-1)
+        kl_per_vocab = F.kl_div(t_lp, s_lp, reduction="none", log_target=True)
         del t_lp, s_lp
+        if token_clip > 0:
+            kl_per_vocab = kl_per_vocab.clamp(max=token_clip)
+        kl_chunk = kl_per_vocab.sum(dim=-1)
+        del kl_per_vocab
 
         kl_sum = kl_sum + kl_chunk.sum()
         del kl_chunk
@@ -71,6 +79,8 @@ def compute_forward_kl_loss(
     teacher_logits: torch.Tensor,
     student_logits: torch.Tensor,
     chunk_size: int = 512,
+    temperature: float = 1.0,
+    token_clip: float = 0.0,
 ) -> tuple[torch.Tensor, int]:
     """Chunk-wise forward KL: KL(p_teacher || p_student).
 
@@ -83,6 +93,8 @@ def compute_forward_kl_loss(
         teacher_logits: (N, V) from frozen teacher (no grad).
         student_logits: (N, V) from trainable student (with grad).
         chunk_size: Tokens per chunk.
+        temperature: Divide logits by this before softmax (1.0 = no scaling).
+        token_clip: Clamp per-element divergence to this value (0 = no clip).
 
     Returns:
         (loss, n_tokens) — scalar mean loss and token count.
@@ -100,15 +112,19 @@ def compute_forward_kl_loss(
         start = i * chunk_size
         end = start + t_chunk.shape[0]
 
-        t_lp = F.log_softmax(t_chunk.float(), dim=-1)
-        s_lp = F.log_softmax(student_logits[start:end].float(), dim=-1)
+        t_lp = F.log_softmax(t_chunk.float() / temperature, dim=-1)
+        s_lp = F.log_softmax(student_logits[start:end].float() / temperature, dim=-1)
         del t_chunk
         teacher_chunks[i] = None
 
         # F.kl_div(input=log_p_S, target=log_p_T, log_target=True)
         # computes: exp(target) * (target - input) = p_T * (log_p_T - log_p_S)
-        kl_chunk = F.kl_div(s_lp, t_lp, reduction="none", log_target=True).sum(dim=-1)
+        kl_per_vocab = F.kl_div(s_lp, t_lp, reduction="none", log_target=True)
         del t_lp, s_lp
+        if token_clip > 0:
+            kl_per_vocab = kl_per_vocab.clamp(max=token_clip)
+        kl_chunk = kl_per_vocab.sum(dim=-1)
+        del kl_per_vocab
 
         kl_sum = kl_sum + kl_chunk.sum()
         del kl_chunk
@@ -121,6 +137,8 @@ def compute_jsd_loss(
     student_logits: torch.Tensor,
     beta: float = 0.5,
     chunk_size: int = 256,
+    temperature: float = 1.0,
+    token_clip: float = 0.0,
 ) -> tuple[torch.Tensor, int]:
     """Chunk-wise Jensen-Shannon divergence with logsumexp mixture.
 
@@ -135,6 +153,8 @@ def compute_jsd_loss(
         student_logits: (N, V) from trainable student (with grad).
         beta: Interpolation weight (0.5 = symmetric JSD).
         chunk_size: Tokens per chunk.
+        temperature: Divide logits by this before softmax (1.0 = no scaling).
+        token_clip: Clamp per-element divergence to this value (0 = no clip).
 
     Returns:
         (loss, n_tokens) — scalar mean JSD loss and token count.
@@ -155,8 +175,8 @@ def compute_jsd_loss(
         start = i * chunk_size
         end = start + t_chunk.shape[0]
 
-        t_lp = F.log_softmax(t_chunk.float(), dim=-1)
-        s_lp = F.log_softmax(student_logits[start:end].float(), dim=-1)
+        t_lp = F.log_softmax(t_chunk.float() / temperature, dim=-1)
+        s_lp = F.log_softmax(student_logits[start:end].float() / temperature, dim=-1)
         del t_chunk
         teacher_chunks[i] = None
 
@@ -166,13 +186,17 @@ def compute_jsd_loss(
             dim=0,
         )
 
-        kl_t = F.kl_div(log_m, t_lp, reduction="none", log_target=True).sum(dim=-1)
+        kl_t = F.kl_div(log_m, t_lp, reduction="none", log_target=True)
         del t_lp
-        kl_s = F.kl_div(log_m, s_lp, reduction="none", log_target=True).sum(dim=-1)
+        kl_s = F.kl_div(log_m, s_lp, reduction="none", log_target=True)
         del s_lp, log_m
 
-        jsd_sum = jsd_sum + (beta * kl_t + (1.0 - beta) * kl_s).sum()
+        jsd_per_vocab = beta * kl_t + (1.0 - beta) * kl_s
         del kl_t, kl_s
+        if token_clip > 0:
+            jsd_per_vocab = jsd_per_vocab.clamp(max=token_clip)
+        jsd_sum = jsd_sum + jsd_per_vocab.sum(dim=-1).sum()
+        del jsd_per_vocab
 
     return jsd_sum / n_tokens, n_tokens
 
@@ -356,6 +380,187 @@ def compute_teacher_token_stats(
         del t_lp, t_p
 
     return torch.cat(entropy_parts), torch.cat(prob_parts)
+
+
+def compute_sampled_token_loss(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    weight_mode: str = "reinforce",
+    gate_beta: float = 5.0,
+) -> tuple[torch.Tensor, int, dict]:
+    """Sampled-token distillation loss (REINFORCE-style policy gradient).
+
+    Only uses log-probabilities at the actually-sampled token, avoiding
+    full-vocabulary computation. Three weight modes control the gradient signal:
+      - reinforce: w = (log_t - log_s).detach()  (unbounded, original OPSD)
+      - gated:    w = sigmoid(beta * (log_t - log_s))  (bounded [0,1], SDAR-style)
+      - weighted: w = exp(log_s).detach() * (log_t - log_s)  (probability-weighted)
+
+    loss = mean(-w * log_s)
+
+    Args:
+        student_log_probs: (N,) log π_student(y_t). Has gradients.
+        teacher_log_probs: (N,) log π_teacher(y_t). Detached.
+        weight_mode: "reinforce" | "gated" | "weighted"
+        gate_beta: Sigmoid temperature (only for gated mode).
+
+    Returns:
+        (loss, n_tokens, metrics) — scalar loss, token count, diagnostics dict.
+    """
+    n_tokens = student_log_probs.shape[0]
+    if n_tokens == 0:
+        return torch.tensor(0.0, device=student_log_probs.device, requires_grad=True), 0, {}
+
+    teacher_log_probs = teacher_log_probs.detach()
+    delta = teacher_log_probs - student_log_probs.detach()
+
+    if weight_mode == "reinforce":
+        weight = delta
+    elif weight_mode == "gated":
+        weight = torch.sigmoid(gate_beta * delta)
+    elif weight_mode == "weighted":
+        weight = student_log_probs.detach().exp() * delta
+    else:
+        raise ValueError(f"Unknown weight_mode: {weight_mode}")
+
+    weight = weight.detach()
+    loss = (-weight * student_log_probs).mean()
+
+    with torch.no_grad():
+        metrics = {
+            "opd/sampled_weight_mean": weight.mean().item(),
+            "opd/sampled_weight_pos_ratio": (weight > 0).float().mean().item(),
+            "opd/sampled_delta_mean": delta.mean().item(),
+        }
+
+    return loss, n_tokens, metrics
+
+
+def compute_topk_divergence_loss(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+    topk: int = 64,
+    loss_type: str = "forward_kl",
+    chunk_size: int = 512,
+    temperature: float = 1.0,
+    token_clip: float = 0.0,
+) -> tuple[torch.Tensor, int]:
+    """Chunk-wise divergence on teacher's top-k token set (renormalized).
+
+    Computes KL/JSD only over teacher's top-k tokens per position, reducing
+    noise from the long-tail of large vocabularies and saving compute.
+
+    For each chunk:
+      1. Select teacher's top-k logits and indices
+      2. Gather student logits at those positions
+      3. Renormalize both over k tokens (log_softmax over dim=-1)
+      4. Compute divergence on the k-sized distribution
+
+    Args:
+        teacher_logits: (N, V) from frozen teacher (no grad).
+        student_logits: (N, V) from trainable student (with grad).
+        topk: Number of teacher top tokens to consider.
+        loss_type: "forward_kl" | "reverse_kl" | "jsd"
+        chunk_size: Tokens per chunk.
+        temperature: Divide logits by this before renormalization.
+        token_clip: Clamp per-element divergence (0 = no clip).
+
+    Returns:
+        (loss, n_tokens) — scalar mean loss and token count.
+    """
+    n_tokens = teacher_logits.shape[0]
+    if n_tokens == 0:
+        return torch.tensor(0.0, device=student_logits.device, requires_grad=True), 0
+
+    teacher_chunks = [c.clone() for c in teacher_logits.split(chunk_size, dim=0)]
+    del teacher_logits
+
+    div_sum = torch.tensor(0.0, device=student_logits.device)
+
+    for i, t_chunk in enumerate(teacher_chunks):
+        start = i * chunk_size
+        end = start + t_chunk.shape[0]
+
+        # Get teacher top-k indices
+        _, topk_idx = (t_chunk.float() / temperature).topk(topk, dim=-1)  # (chunk, k)
+
+        # Gather both at teacher's top-k positions
+        t_topk = t_chunk.float().gather(-1, topk_idx) / temperature  # (chunk, k)
+        s_topk = student_logits[start:end].float().gather(-1, topk_idx) / temperature  # (chunk, k)
+        del t_chunk
+        teacher_chunks[i] = None
+
+        # Renormalize over k tokens
+        t_lp = F.log_softmax(t_topk, dim=-1)
+        s_lp = F.log_softmax(s_topk, dim=-1)
+        del t_topk, s_topk
+
+        # Compute divergence
+        if loss_type == "forward_kl":
+            div_per_vocab = F.kl_div(s_lp, t_lp, reduction="none", log_target=True)
+        elif loss_type == "reverse_kl":
+            div_per_vocab = F.kl_div(t_lp, s_lp, reduction="none", log_target=True)
+        elif loss_type == "jsd":
+            log_m = torch.logsumexp(
+                torch.stack([t_lp + math.log(0.5), s_lp + math.log(0.5)], dim=0), dim=0
+            )
+            kl_t = F.kl_div(log_m, t_lp, reduction="none", log_target=True)
+            kl_s = F.kl_div(log_m, s_lp, reduction="none", log_target=True)
+            div_per_vocab = 0.5 * kl_t + 0.5 * kl_s
+            del log_m, kl_t, kl_s
+        else:
+            raise ValueError(f"Unknown loss_type for topk: {loss_type}")
+        del t_lp, s_lp
+
+        if token_clip > 0:
+            div_per_vocab = div_per_vocab.clamp(max=token_clip)
+        div_sum = div_sum + div_per_vocab.sum(dim=-1).sum()
+        del div_per_vocab
+
+    return div_sum / n_tokens, n_tokens
+
+
+def compute_divergence_loss(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+    jsd_beta: float = 0.0,
+    temperature: float = 1.0,
+    token_clip: float = 0.0,
+    chunk_size: int = 512,
+) -> tuple[torch.Tensor, int]:
+    """Unified divergence loss with continuous jsd_beta control.
+
+    Provides a single entry point for all full-vocab divergence directions:
+      - jsd_beta=0.0: Forward KL — KL(p_teacher || p_student), mean-seeking
+      - jsd_beta=1.0: Reverse KL — KL(p_student || p_teacher), mode-seeking
+      - 0 < jsd_beta < 1: JSD_beta(p_teacher || p_student), balanced
+
+    Args:
+        teacher_logits: (N, V) from frozen teacher (no grad).
+        student_logits: (N, V) from trainable student (with grad).
+        jsd_beta: 0=FKL, 1=RKL, (0,1)=JSD with this as interpolation weight.
+        temperature: Divide logits by this before softmax.
+        token_clip: Clamp per-element divergence (0 = no clip).
+        chunk_size: Tokens per chunk.
+
+    Returns:
+        (loss, n_tokens) — scalar mean loss and token count.
+    """
+    if jsd_beta == 0.0:
+        return compute_forward_kl_loss(
+            teacher_logits, student_logits,
+            chunk_size=chunk_size, temperature=temperature, token_clip=token_clip,
+        )
+    elif jsd_beta == 1.0:
+        return compute_reverse_kl_loss(
+            teacher_logits, student_logits,
+            chunk_size=chunk_size, temperature=temperature, token_clip=token_clip,
+        )
+    else:
+        return compute_jsd_loss(
+            teacher_logits, student_logits,
+            beta=jsd_beta, chunk_size=chunk_size, temperature=temperature, token_clip=token_clip,
+        )
 
 
 LOSS_FN_MAP = {
