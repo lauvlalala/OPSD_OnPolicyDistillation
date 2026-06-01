@@ -1,0 +1,19 @@
+tools:
+  - class_name: tools.webshop_tool.WebShopTool
+    config:
+      max_steps: 15
+      data_path: ${oc.env:WEBSHOP_PATH,}
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: act
+        description: Execute an action in the web shopping environment. Actions include search[query], click[element], and others.
+        parameters:
+          type: object
+          properties:
+            action:
+              type: string
+              description: "The action to perform (e.g., 'search[wireless headphones]', 'click[Buy Now]', 'click[Back to Search]')."
+          required:
+            - action
