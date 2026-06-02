@@ -60,6 +60,10 @@ def compute_score(solution_str: str, ground_truth: str, **kwargs) -> Union[float
         from rewards.webshop_reward import compute_score as _fn
         return _fn(solution_str, ground_truth, **kwargs)
 
+    elif data_source in ("swe_gym",):
+        from rewards.swe_reward import compute_score as _fn
+        return _fn(solution_str, ground_truth, **kwargs)
+
     else:
         # Default: try math_reward (boxed answer match)
         from rewards.math_reward import compute_score as _fn

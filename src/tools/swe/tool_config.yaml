@@ -1,0 +1,20 @@
+tools:
+  - class_name: tools.swe_bash_tool.SWEBashTool
+    config:
+      max_output_length: 16000
+      timeout: 120
+      workdir: /testbed
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: bash
+        description: Execute a bash command in the repository environment. Use this to explore code, edit files, run tests, and fix issues.
+        parameters:
+          type: object
+          properties:
+            command:
+              type: string
+              description: The bash command to execute (e.g., "find . -name '*.py'", "cat src/module.py", "sed -i 's/old/new/' file.py", "pytest tests/").
+          required:
+            - command
