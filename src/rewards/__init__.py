@@ -24,47 +24,44 @@ def compute_score(solution_str: str, ground_truth: str, **kwargs) -> Union[float
         dict with at least {score, acc, pred, feedback} fields,
         or float for backward compatibility.
     """
-    # Try to get data_source from kwargs or extra_info
     data_source = kwargs.get("data_source", "")
     if not data_source:
         extra_info = kwargs.get("extra_info", {})
         if isinstance(extra_info, dict):
             data_source = extra_info.get("data_source", "")
 
-    # Dispatch
     if data_source in ("sciknoweval",):
-        from rewards.sciknoweval_reward import compute_score as _fn
+        from rewards.sciknoweval import compute_score as _fn
         return _fn(solution_str, ground_truth, **kwargs)
 
     elif data_source in ("tooluse",):
-        from rewards.tooluse_reward import compute_score as _fn
+        from rewards.tooluse import compute_score as _fn
         return _fn(solution_str, ground_truth, **kwargs)
 
     elif data_source in ("livecodebench", "code"):
-        from rewards.livecodebench_reward import compute_score as _fn
+        from rewards.livecodebench import compute_score as _fn
+        return _fn(solution_str, ground_truth, **kwargs)
+
+    elif data_source in ("searchqa",):
+        from rewards.searchqa import compute_score as _fn
+        return _fn(solution_str, ground_truth, **kwargs)
+
+    elif data_source in ("alfworld",):
+        from rewards.alfworld import compute_score as _fn
+        return _fn(solution_str, ground_truth, **kwargs)
+
+    elif data_source in ("webshop",):
+        from rewards.webshop import compute_score as _fn
+        return _fn(solution_str, ground_truth, **kwargs)
+
+    elif data_source in ("swe_gym",):
+        from rewards.swe import compute_score as _fn
         return _fn(solution_str, ground_truth, **kwargs)
 
     elif data_source in ("openthoughts", "math_dapo", "math", "math500"):
         from rewards.math_reward import compute_score as _fn
         return _fn(solution_str, ground_truth, **kwargs)
 
-    elif data_source in ("searchqa",):
-        from rewards.searchqa_reward import compute_score as _fn
-        return _fn(solution_str, ground_truth, **kwargs)
-
-    elif data_source in ("alfworld",):
-        from rewards.alfworld_reward import compute_score as _fn
-        return _fn(solution_str, ground_truth, **kwargs)
-
-    elif data_source in ("webshop",):
-        from rewards.webshop_reward import compute_score as _fn
-        return _fn(solution_str, ground_truth, **kwargs)
-
-    elif data_source in ("swe_gym",):
-        from rewards.swe_reward import compute_score as _fn
-        return _fn(solution_str, ground_truth, **kwargs)
-
     else:
-        # Default: try math_reward (boxed answer match)
         from rewards.math_reward import compute_score as _fn
         return _fn(solution_str, ground_truth, **kwargs)

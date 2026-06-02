@@ -1,5 +1,5 @@
 tools:
-  - class_name: tools.alfworld_tool.AlfWorldTool
+  - class_name: tools.alfworld.tool.AlfWorldTool
     config:
       max_steps: 50
       data_path: ${oc.env:ALFWORLD_DATA,}

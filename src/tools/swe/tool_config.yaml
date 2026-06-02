@@ -1,5 +1,5 @@
 tools:
-  - class_name: tools.swe_bash_tool.SWEBashTool
+  - class_name: tools.swe.tool.SWEBashTool
     config:
       max_output_length: 16000
       timeout: 120
