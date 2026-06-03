@@ -89,29 +89,32 @@ class OPDWorker(AsyncActorRolloutRefWorker):
     def sync_ref_from_actor(self, data: DataProto) -> DataProto:
         """Sync teacher (ref) weights from student (actor). Supports hard copy and EMA.
 
+        Handles verl 0.7.0's forced native CPUOffload on ref by operating on
+        whatever device each param is on (CPU for native-offloaded ref, GPU for actor).
+
         Args (via data.meta_info):
             ema_decay: 0 = hard copy, >0 = EMA: ref = decay*ref + (1-decay)*actor
         """
-        ema_decay = data.meta_info.get("ema_decay", 0.0)
-        ref_needs_offload = self.config.ref.fsdp_config.get("param_offload", False)
+        from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 
-        if ref_needs_offload:
-            load_fsdp_model_to_gpu(self.ref_module_fsdp)
+        ema_decay = data.meta_info.get("ema_decay", 0.0)
+
+        # Actor uses manual offload; bring to GPU so we can read its params
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         with torch.no_grad():
-            for ref_p, actor_p in zip(
-                self.ref_module_fsdp.parameters(),
-                self.actor_module_fsdp.parameters(),
+            for (ref_name, ref_p), (_, actor_p) in zip(
+                self.ref_module_fsdp.named_parameters(),
+                self.actor_module_fsdp.named_parameters(),
             ):
+                # Move actor param to ref's device (handles native CPUOffload on ref)
+                actor_data = actor_p.data.to(ref_p.data.device)
                 if ema_decay > 0:
-                    ref_p.data.mul_(ema_decay).add_(actor_p.data, alpha=1 - ema_decay)
+                    ref_p.data.mul_(ema_decay).add_(actor_data, alpha=1 - ema_decay)
                 else:
-                    ref_p.data.copy_(actor_p.data)
+                    ref_p.data.copy_(actor_data)
 
-        if ref_needs_offload:
-            offload_fsdp_model_to_cpu(self.ref_module_fsdp)
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
