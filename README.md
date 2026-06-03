@@ -85,21 +85,20 @@ src/
 ## 环境要求
 
 - **Python**: 3.10
-- **CUDA**: 12.8（通过 PyTorch wheel 自带，driver >= 535 即可）
-- **GPU**: 8× H20/A100/H100（已测试 8×H20 96GB）
-- **GCC**: >= 9（flashinfer JIT 编译需要，CentOS 可用 `source /opt/rh/gcc-toolset-13/enable`）
+- **CUDA**: 12.8
+
 
 核心依赖版本：
 
-| 包 | 版本 | 说明 |
+| 包 | 版本 | 
 |---|---|---|
-| torch | 2.8.0+cu128 | |
-| verl | 0.7.0 | editable install from source |
-| sglang | 0.5.2 | `pip install "sglang[all]==0.5.2"` |
-| uvicorn | **0.40.0** | 必须 < 0.41，verl 0.7.0 兼容性问题 |
-| transformers | 4.56.1 | |
-| flash_attn | 2.8.4 | |
-| flashinfer | 0.3.1 | |
+| torch | 2.8.0+cu128 | 
+| verl | 0.7.0dev0|
+| sglang | 0.5.2  |
+| uvicorn | 0.40.0| 
+| transformers | 4.56.1 | 
+| flash_attn | 2.8.4 | 
+| flashinfer | 0.3.1 | 
 | ray | 2.55.1 | |
 
 完整依赖见 `requirements.txt`。
