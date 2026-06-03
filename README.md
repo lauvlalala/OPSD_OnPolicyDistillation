@@ -1,177 +1,120 @@
-# Memory Efficient On-Policy Distillation Training
+# OPSD：内存高效的在策略蒸馏训练框架
 
-Minimal training repo for on-policy distillation experiments built on top of `verl`.
+基于 `verl` 框架构建的**在策略蒸馏（On-Policy Distillation）**训练仓库，用于将大型"教师"语言模型的知识高效蒸馏到较小的"学生"模型中。支持单轮数学推理和多轮 Agent 工具调用两种场景。
 
-## Papers
+## 算法架构
 
-This repository is related to the following papers:
+![OPSD 算法架构图](assets/opsd_architecture.png)
 
-- [TIP: Token Importance in On-Policy Distillation](https://arxiv.org/abs/2604.14084) ([PDF](https://arxiv.org/pdf/2604.14084))
-  - Studies which token positions carry the most useful learning signal in OPD.
-  - Introduces the TIP view of token importance based on student entropy and teacher-student divergence.
+## 核心特性
 
-- [PACED: Distillation and On-Policy Self-Distillation at the Frontier of Student Competence](https://arxiv.org/abs/2603.11178) ([PDF](https://arxiv.org/pdf/2603.11178))
-  - Studies sample importance for distillation and self-distillation at the problem level.
-  - Proposes weighting problems by student empirical pass rate, emphasizing the frontier of student competence.
-  - A two-stage forward-then-reverse KL schedule leads to the best performance.
+### 两阶段内存高效蒸馏
 
-- [Beyond GRPO and On-Policy Distillation: An Empirical Sparse-to-Dense Reward Principle for Language-Model Post-Training](https://arxiv.org/abs/2605.12483) ([PDF](https://arxiv.org/pdf/2605.12483))
-  - Use RL on a strong teacher model to explore high-reward reasoning behaviors.
-  - Distill the RL-trained teacher into a smaller student with dense token-level supervision (FKL-OPD two-stage pipeline).
-  - This teacher-RL + distillation setup outperforms directly training small models with GRPO/RL.
-  - 
-## OPD: On-Policy Distillation with Separate Teacher
+OPD 采用两阶段 GPU 调度避免同时加载教师和学生模型：
 
-A separate (typically bigger) teacher model and a trainable student model see the same input sequences. The teacher produces better distributions naturally; no ground-truth injection is needed.
+1. **阶段一（教师）**：加载教师模型，对所有 micro-batch 前向推理，将 logits 缓存到 CPU，卸载教师
+2. **阶段二（学生）**：加载学生模型和优化器，从 CPU 加载教师 logits，计算散度损失并反向传播
 
-- Entry point: `python -m opd.main_opd`
-- Requires `TEACHER_MODEL_PATH` environment variable
-- Batch construction: `build_opd_batch` (trainer entry point) prefers pre-tokenized `batch["prompts"]` + `response_mask` so training matches rollout inputs; falls back to `raw_prompt` + chat template only if prompts are absent
-- `build_opd_batch_multiturn` / `build_opd_batch_from_verl_batch` remain as thin aliases for the prompts-only and raw-prompt-only paths
-- Supports reward-weighted distillation via `opd.reward_beta` config
+### 散度损失函数
 
-## Multi-turn Agent-loop Support
+支持三种散度类型（均采用分块计算避免 OOM）：
 
-OPD supports multi-turn agent-loop rollouts where the response contains interleaved LLM-generated tokens and tool/environment tokens:
+| 类型 | 说明 |
+|------|------|
+| `reverse_kl` | KL(学生‖教师)，模式寻求，学生聚焦教师高概率 token |
+| `forward_kl` | KL(教师‖学生)，均值寻求，学生覆盖教师所有模式 |
+| `jsd` | Jensen-Shannon 散度，两者的平衡插值 |
 
-- The trainer preserves the agent-loop `response_mask` (1=LLM, 0=tool) instead of recomputing it
-- The batch builder uses `response_mask` as the per-token loss mask so distillation only targets LLM-generated spans
-- `build_opd_batch` uses pre-tokenized prompt IDs from `batch["prompts"]` when present for exact prompt matching
+### Token Scope 策略
 
-Multi-turn diagnostics are logged: `tool_mask/llm_tokens`, `tool_mask/tool_tokens`, `tool_mask/tool_ratio`, `num_turns/*`.
+- **`full_vocab`**：比较完整词表分布（最准确）
+- **`topk`**：只比较教师 top-K 个 token（减少噪声，节省内存）
+- **`sampled_token`**：只比较生成 token 的 log-prob（最省内存）
 
-## Layout
+### 特权信息（PI）模式
+
+- `none`：标准 OPD，教师与学生看到相同输入
+- `static`：教师从数据字段获取正确答案
+- `rollout`：教师从成功 rollout 中获取示范
+- `rollout+feedback`：rollout PI + 环境反馈
+
+### 多轮 Agent 循环
+
+支持多轮工具调用场景（ALFWorld、WebShop、SWE 等），蒸馏仅针对 LLM 生成的 token 部分，工具/环境返回的 token 通过 `response_mask` 自动排除。
+
+### 教师更新策略
+
+支持三种教师模型更新模式：
+
+| 模式 | 说明 |
+|------|------|
+| **固定教师（Fixed）** | 教师模型全程不更新，通常使用独立的大模型作为教师 |
+| **硬拷贝（Hard Copy）** | 每 N 步将学生权重完整拷贝给教师 |
+| **EMA 滑动平均** | 每 N 步做指数移动平均更新：`teacher = decay × teacher + (1 - decay) × student` |
+
+## 项目结构
 
 ```text
 scripts/
-  eval/
-  grpo/
-  opd/          # OPD training scripts (separate teacher)
-  utils/
+  eval/           # 评估脚本
+  grpo/           # GRPO 基线训练脚本
+  opd/            # OPD/OPSD 训练脚本
+  utils/          # 工具脚本（checkpoint 转换等）
 src/
-  common/       # Shared batch builder
-  data/
-  opd/          # OPD module (separate teacher model)
-  rewards/
+  common/         # 共享的 batch 构建工具
+  data/           # 数据准备脚本
+  opd/            # 核心 OPD 模块（训练器、worker、损失函数）
+  rewards/        # 奖励函数（数学、代码、Agent 等）
+  tools/          # Agent 工具集成（搜索、ALFWorld、WebShop、SWE）
 ```
 
-## Environment Assumptions
+## 支持的任务
 
-The scripts assume a GPU machine with:
+| 数据集 | 类型 | 训练脚本 |
+|--------|------|---------|
+| DAPO-Math-17k | 数学推理 | `train_opsd_dapo.sh` |
+| OpenThoughts | 数学推理 | `train_opsd_openthoughts.sh` |
+| LiveCodeBench | 代码生成 | `train_opsd_livecodebench.sh` |
+| SciKnowEval | 科学问答 | `train_opsd_sciknoweval.sh` |
+| SearchQA | 搜索检索 | `train_opsd_searchqa.sh` |
+| ToolUse | 工具调用 | `train_opsd_tooluse.sh` |
+| ALFWorld | 交互式 Agent | `train_opsd_alfworld.sh` |
+| WebShop | 网购 Agent | `train_opsd_webshop.sh` |
+| SWE-Gym | 软件工程 | `train_opsd_swe_gym.sh` |
 
-- Python 3
-- CUDA and `nvidia-smi`
-- `verl`
-- `torch`
-- `transformers`
-- `ray`
-- `hydra`
-- `tensordict`
+## 环境要求
 
-The setup scripts under `scripts/*/setup_*.sh` only do lightweight verification plus `pip install tensordict`; they do not create a full environment from scratch.
-
-## Tested Environment
-
-The current testing environment is:
+需要 GPU 机器，已测试环境：
 
 ```text
 verl         0.7.0.7
 torch        2.9.1.7
 transformers 4.57.1
 torchao      0.9.0
-torchaudio   2.9.1.1
-torchvision  0.24.1.10
 ```
 
-## Data Layout
+其他依赖：Python 3、CUDA、Ray、Hydra、tensordict
 
-By default, training and eval scripts look for data under:
+## 快速开始
 
-```text
-<repo>/data
-```
-
-Expected raw inputs:
-
-```text
-data/
-  DAPO-Math-17k-dedup/distinct-prompts-with-rewards.parquet
-  AIME_2024/aime_2024_problems.parquet
-  AIME_2025/train.jsonl
-  MATH-500/test.jsonl
-```
-
-Generated files:
-
-- `data/grpo_processed/*.parquet` from `src/data/prepare_grpo_data.py`
-- `data/eval_processed/<variant>/*.parquet` from `src/data/process_eval_data.py`
-
-## Memory Efficiency
-
-The training code uses several mechanisms to keep memory usage manageable on long-context math runs:
-
-- FSDP parameter and optimizer offload. The launch scripts enable `actor.fsdp_config.param_offload=True`, `actor.fsdp_config.optimizer_offload=True`, and `ref.fsdp_config.param_offload=True` so model weights and optimizer state can be moved off GPU when inactive.
-- Remove-padding execution. Training scripts set `actor_rollout_ref.model.use_remove_padding=True`, and the OPD worker uses unpadded sequence paths so compute and memory scale with real token count instead of padded sequence length.
-- Two-phase teacher/student execution for distillation. OPD does not keep both teacher and student workloads active on GPU at the same time. The worker first runs teacher-side computation, moves cached teacher statistics or logits to CPU, offloads the teacher, and only then runs the student update step.
-- Chunked divergence computation. OPD divergence losses in `src/opd/losses.py` process tokens in chunks instead of materializing full-vocabulary probability tensors for the whole batch at once.
-- Micro-batching in the worker. OPD splits batches using `ppo_micro_batch_size_per_gpu` and accumulates gradients across micro-batches to bound activation and logits memory.
-- Dynamic batch sizing for GRPO. The main GRPO script enables `actor.use_dynamic_bsz` and caps per-GPU token counts with `ppo_max_token_len_per_gpu` and `log_prob_max_token_len_per_gpu`, which is useful when response lengths vary a lot.
-- Rollout memory controls. The scripts enable `rollout.free_cache_engine=True` and expose `GPU_MEMORY_UTIL` so KV-cache usage can be bounded during generation.
-
-In practice, the biggest repo-specific savings come from the OPD two-phase worker design, chunked loss computation, and remove-padding execution.
-
-## Distillation Implementation
-
-OPD (`src/opd/opd_worker.py`) uses a two-phase update:
-
-1. **Phase 1 (Teacher):** Load the teacher (`ref`) model, run teacher forwards for all micro-batches, cache teacher logits on CPU, offload teacher.
-2. **Phase 2 (Student):** Load the student (`actor`) model and optimizer, run student forward + divergence loss + backward using cached teacher logits.
-
-This avoids keeping both teacher and student compute active on GPU at the same time during the update step.
-
-OPD supports three divergence types (`reverse_kl`, `forward_kl`, `jsd`), chunk-wise loss computation, and per-sample reward weighting.
-
-## Main Entry Points
-
-GRPO:
-
-```bash
-bash scripts/grpo/setup_grpo.sh
-MODEL_PATH=/path/to/model \
-MODEL_NAME=my-model \
-bash scripts/grpo/train_grpo.sh
-```
-
-Native GRPO with KL:
-
-```bash
-MODEL_PATH=/path/to/model \
-MODEL_NAME=my-model \
-bash scripts/grpo/train_grpo_native.sh
-```
-
-Native GRPO without KL:
-
-```bash
-MODEL_PATH=/path/to/model \
-MODEL_NAME=my-model \
-bash scripts/grpo/train_grpo_native_no_kl.sh
-```
-
-OPD (separate teacher, single-turn math):
+### 环境验证
 
 ```bash
 bash scripts/opd/setup_opd.sh
+```
+
+### OPD 训练（独立教师，单轮数学）
+
+```bash
 MODEL_PATH=/path/to/student_model \
 TEACHER_MODEL_PATH=/path/to/teacher_model \
 MODEL_NAME=my-model \
 bash scripts/opd/train_opd.sh
 ```
 
-OPD (separate teacher, multi-turn agent with tool calls):
+### OPD 训练（多轮 Agent 工具调用）
 
 ```bash
-bash scripts/opd/setup_opd.sh
 MODEL_PATH=/path/to/student_model \
 TEACHER_MODEL_PATH=/path/to/teacher_model \
 DATABASE_DIR=/path/to/tool/database \
@@ -179,64 +122,40 @@ MODEL_NAME=my-model \
 bash scripts/opd/train_opd_agent.sh
 ```
 
-Evaluation:
+### GRPO 基线训练
 
 ```bash
 MODEL_PATH=/path/to/model \
 MODEL_NAME=my-model \
+bash scripts/grpo/train_grpo.sh
+```
+
+### 评估
+
+```bash
+MODEL_PATH=/path/to/model \
 INSTRUCTION_VARIANT=boxed \
 REWARD_FUNCTION=math_reward \
 bash scripts/eval/eval_math.sh
 ```
 
-Checkpoint conversion:
+### Checkpoint 转换
 
 ```bash
 CHECKPOINT_PATH=/path/to/global_step_54/actor \
 bash scripts/utils/convert_checkpoint.sh
 ```
 
-## Useful Environment Variables
+## 内存优化机制
 
-Most training scripts accept overrides through environment variables, including:
+- **两阶段 GPU 调度**：教师和学生不同时占用 GPU
+- **分块散度计算**：避免实例化完整 (N, V) 概率张量
+- **FSDP offload**：参数和优化器状态可卸载到 CPU
+- **Remove-padding**：计算量仅与实际 token 数成正比
+- **Micro-batching**：梯度累积控制峰值内存
+- **动态 batch sizing**：适应变长响应
+- **KV-cache 内存控制**：rollout 阶段可配置显存占用上限
 
-- `MODEL_PATH`
-- `MODEL_NAME`
-- `DATA_DIR`
-- `TRAIN_BATCH_SIZE`
-- `PPO_MINI_BATCH_SIZE`
-- `PPO_MICRO_BATCH_SIZE_PER_GPU`
-- `LEARNING_RATE`
-- `TOTAL_EPOCHS`
-- `MAX_PROMPT_LENGTH`
-- `MAX_RESPONSE_LENGTH`
-- `ROLLOUT_N`
-- `TP_SIZE`
-- `GPU_MEMORY_UTIL`
+## 许可证
 
-OPD-specific variables:
-
-- `TEACHER_MODEL_PATH` (required)
-- `OPD_LOSS_TYPE`
-- `OPD_CHUNK_SIZE`
-- `OPD_MAX_LENGTH`
-- `OPD_REWARD_BETA`
-- `ENABLE_THINKING`
-
-OPD agent additional variables:
-
-- `ENABLE_TOOLS`
-- `MAX_ASSISTANT_TURNS`
-- `MAX_TOOL_RESPONSE_LENGTH`
-- `TOOL_FORMAT`
-- `AGENT_NUM_WORKERS`
-- `DATABASE_DIR`
-
-Eval variables:
-
-- `INSTRUCTION_VARIANT`
-- `REWARD_FUNCTION`
-- `VAL_TEMPERATURE`
-- `VAL_TOP_P`
-- `VAL_TOP_K`
-- `VAL_N`
+研究用途。
