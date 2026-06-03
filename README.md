@@ -90,16 +90,16 @@ src/
 
 核心依赖版本：
 
-| 包 | 版本 | 
-|---|---|---|
-| torch | 2.8.0+cu128 | 
-| verl | 0.7.0dev0|
-| sglang | 0.5.2  |
-| uvicorn | 0.40.0| 
-| transformers | 4.56.1 | 
-| flash_attn | 2.8.4 | 
-| flashinfer | 0.3.1 | 
-| ray | 2.55.1 | |
+| 包 | 版本 |
+|---|---|
+| torch | 2.8.0+cu128 |
+| verl | 0.7.0dev0 |
+| sglang | 0.5.2 |
+| uvicorn | 0.40.0 |
+| transformers | 4.56.1 |
+| flash_attn | 2.8.4 |
+| flashinfer | 0.3.1 |
+| ray | 2.55.1 |
 
 完整依赖见 `requirements.txt`。
 
