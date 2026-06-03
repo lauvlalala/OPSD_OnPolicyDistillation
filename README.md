@@ -84,24 +84,45 @@ src/
 
 ## 环境要求
 
-需要 GPU 机器，已测试环境：
+- **Python**: 3.10
+- **CUDA**: 12.8（通过 PyTorch wheel 自带，driver >= 535 即可）
+- **GPU**: 8× H20/A100/H100（已测试 8×H20 96GB）
+- **GCC**: >= 9（flashinfer JIT 编译需要，CentOS 可用 `source /opt/rh/gcc-toolset-13/enable`）
 
-```text
-verl         0.7.0.7
-torch        2.9.1.7
-transformers 4.57.1
-torchao      0.9.0
-```
+核心依赖版本：
 
-其他依赖：Python 3、CUDA、Ray、Hydra、tensordict
+| 包 | 版本 | 说明 |
+|---|---|---|
+| torch | 2.8.0+cu128 | |
+| verl | 0.7.0 | editable install from source |
+| sglang | 0.5.2 | `pip install "sglang[all]==0.5.2"` |
+| uvicorn | **0.40.0** | 必须 < 0.41，verl 0.7.0 兼容性问题 |
+| transformers | 4.56.1 | |
+| flash_attn | 2.8.4 | |
+| flashinfer | 0.3.1 | |
+| ray | 2.55.1 | |
 
-## 快速开始
+完整依赖见 `requirements.txt`。
 
-### 环境验证
+### 环境配置
+
+训练脚本会自动加载项目根目录的 `.env` 文件（已 gitignore），需包含：
 
 ```bash
-bash scripts/opd/setup_opd.sh
+# .env 模板
+export PATH="/path/to/conda/envs/opsd/bin:$PATH"
+source /opt/rh/gcc-toolset-13/enable 2>/dev/null || true  # CentOS GCC 升级
+export HF_HOME="/path/to/.cache/huggingface"
+export WANDB_API_KEY="your_key"
+export MODEL_PATH="/path/to/model"
+export no_proxy="127.0.0.1,localhost"   # 绕过 HTTP 代理（如有）
+export NO_PROXY="127.0.0.1,localhost"
+export RAY_ADDRESS=""                   # 避免连接已有 Ray 集群
+export TORCH_CUDA_ARCH_LIST="9.0"      # H20/H100: 9.0, A100: 8.0
+export TOKENIZERS_PARALLELISM="false"
 ```
+
+## 快速开始
 
 ### OPD 训练（独立教师，单轮数学）
 
