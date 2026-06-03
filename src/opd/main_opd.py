@@ -71,12 +71,9 @@ class OPDTaskRunner:
         return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
     def run(self, config):
-        from verl.experimental.reward_loop import migrate_legacy_reward_impl
         from verl.utils.fs import copy_to_local
 
         logger.info("OPDTaskRunner on %s, PID %d", socket.gethostname(), os.getpid())
-
-        config = migrate_legacy_reward_impl(config)
 
         try:
             OmegaConf.resolve(config)

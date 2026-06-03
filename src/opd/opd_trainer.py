@@ -204,7 +204,7 @@ class OPDTrainer(RayPPOTrainer):
             size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             test_output_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
-            self.checkpoint_manager.sleep_replicas()
+            self.async_rollout_manager.sleep()
             test_output = unpad_dataproto(test_output_padded, pad_size=pad_size)
 
             test_batch = test_batch.union(test_output)
@@ -263,7 +263,7 @@ class OPDTrainer(RayPPOTrainer):
 
         py_logger.info("Validation results: %s", metrics)
         # Wake SGLang back up for the next rollout
-        self.checkpoint_manager.update_weights()
+        self.async_rollout_manager.wake_up()
         return metrics
 
     def fit(self):
@@ -279,7 +279,7 @@ class OPDTrainer(RayPPOTrainer):
 
         self.global_steps = 0
         self._load_checkpoint()
-        self.checkpoint_manager.update_weights()
+        self.async_rollout_manager.wake_up()
         progress = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="OPD Training")
 
         if self.config.trainer.get("val_before_train", True):
@@ -320,7 +320,7 @@ class OPDTrainer(RayPPOTrainer):
 
                 gen_t0 = time.time()
                 gen_output = self.async_rollout_manager.generate_sequences(gen_batch)
-                self.checkpoint_manager.sleep_replicas()
+                self.async_rollout_manager.sleep()
                 metrics["timing/generate_s"] = time.time() - gen_t0
 
                 batch = batch.union(gen_output)
@@ -462,7 +462,7 @@ class OPDTrainer(RayPPOTrainer):
                     metrics["opd/skipped"] = 1.0
 
                 # Reload SGLang with updated actor weights for next rollout
-                self.checkpoint_manager.update_weights()
+                self.async_rollout_manager.wake_up()
                 metrics["timing/train_s"] = time.time() - train_t0
 
                 # EMA teacher sync (OPSD mode)

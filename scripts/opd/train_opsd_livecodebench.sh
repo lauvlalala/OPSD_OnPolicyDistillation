@@ -93,7 +93,7 @@ python3 -m opd.main_opd \
     opd.pi_mode=rollout+feedback \
     opd.teacher_sync_freq=${teacher_sync_freq} \
     opd.teacher_ema_decay=${teacher_ema_decay} \
-    reward.custom_reward_function.path="${SRC_ROOT}/rewards/livecodebench.py" \
+    reward.custom_reward_function.path="${SRC_ROOT}/rewards/livecodebench_reward.py" \
     reward.custom_reward_function.name=compute_score \
     trainer.logger='["console"]' \
     trainer.experiment_name=$EXP_NAME \

@@ -1,0 +1,28 @@
+# Secrets and local config
+.env
+
+# Data and model outputs (large files)
+data/
+outputs/
+*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Logs and checkpoints
+*.log
+wandb/
+runs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

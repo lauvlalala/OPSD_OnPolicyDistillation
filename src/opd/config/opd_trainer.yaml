@@ -19,12 +19,12 @@ hydra:
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
   - data@data: legacy_data
+  - reward_manager@reward_manager
   - ref@actor_rollout_ref.ref: dp_ref
   - rollout@actor_rollout_ref.rollout: rollout
   - model@actor_rollout_ref.model: hf_model
   - critic@critic: dp_critic
-  - legacy_reward_impl
-  - reward@reward: reward
+  - reward_model@reward_model: dp_reward_loop
   - _self_
 
 data:
@@ -152,9 +152,12 @@ opd:
   teacher_ema_decay: 0.0
 
 # ---------- Reward (validation only, no RM) ----------
-reward:
-  reward_model:
-    enable: false
+reward_model:
+  enable: false
+
+custom_reward_function:
+  path: null
+  name: compute_score
 
 # ---------- Trainer ----------
 trainer:
