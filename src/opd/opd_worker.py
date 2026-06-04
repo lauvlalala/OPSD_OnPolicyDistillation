@@ -13,7 +13,6 @@ Training step:
 
 import logging
 import math
-import os
 
 import torch
 import torch.nn.functional as F
@@ -167,8 +166,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         device = get_device_id()
 
         batch_size = data.batch["student_input_ids"].shape[0]
-              f"teacher_shape={list(data.batch['teacher_input_ids'].shape)}, "
-              f"student_shape={list(data.batch['student_input_ids'].shape)}, "
+        single_model_mode = data.meta_info.get("single_model_mode", False)
         if batch_size == 0:
             return DataProto(meta_info={"metrics": {"opd/loss": 0.0, "opd/num_tokens": 0}})
 
@@ -179,14 +177,20 @@ class OPDWorker(AsyncActorRolloutRefWorker):
 
         with self.ulysses_sharding_manager:
             # ------------------------------------------------------------------
-            # Phase 1: Teacher forward — only ref model on GPU
+            # Phase 1: Teacher forward
             # ------------------------------------------------------------------
             _mem("phase1-before-ref-load")
-            if hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None and ref_needs_offload:
-                load_fsdp_model_to_gpu(self.ref_module_fsdp)
+            if single_model_mode:
+                if self._is_offload_param:
+                    load_fsdp_model_to_gpu(self.actor_module_fsdp)
+                teacher_model = self.actor_module_fsdp
+            else:
+                if hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None and ref_needs_offload:
+                    load_fsdp_model_to_gpu(self.ref_module_fsdp)
+                teacher_model = self.ref_module_fsdp
             _mem("phase1-after-ref-load")
 
-            self.ref_module_fsdp.eval()
+            teacher_model.eval()
             forward_fn = self._forward_logits_unpadded if use_remove_padding else self._forward_logits_padded
             teacher_logits_cache = []  # list of (teacher_logits_cpu, is_valid)
 
@@ -201,10 +205,9 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                             i, list(t_input_ids.shape), int(t_loss_mask[:, 1:].sum().item()))
                 _mem(f"phase1-mb{i}-before-teacher-fwd")
 
-                rank = os.environ.get("RANK", "?")
                 with torch.no_grad():
                     teacher_logits = forward_fn(
-                        self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids, t_loss_mask
+                        teacher_model, t_input_ids, t_attention_mask, t_position_ids, t_loss_mask
                     )
                 logger.info("[OPD-MEM] phase1 micro_batch[%d]: teacher_logits shape=%s",
                             i, list(teacher_logits.shape))
@@ -235,17 +238,18 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 _mem(f"phase1-mb{i}-after-cache-to-cpu")
 
             _mem("phase1-before-ref-offload")
-            if ref_needs_offload:
+            if not single_model_mode and ref_needs_offload:
                 offload_fsdp_model_to_cpu(self.ref_module_fsdp)
             _mem("phase1-after-ref-offload")
 
-            torch.cuda.empty_cache()
+            if not single_model_mode:
+                torch.cuda.empty_cache()
             _mem("phase1-after-empty-cache")
 
             # ------------------------------------------------------------------
             # Phase 2: Student forward + loss + backward — actor + optimizer on GPU
             # ------------------------------------------------------------------
-            if self._is_offload_param:
+            if not single_model_mode and self._is_offload_param:
                 load_fsdp_model_to_gpu(self.actor_module_fsdp)
             _mem("phase2-after-actor-load")
             if self._is_offload_optimizer:

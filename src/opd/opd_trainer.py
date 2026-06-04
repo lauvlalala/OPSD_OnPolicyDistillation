@@ -84,6 +84,7 @@ class OPDTrainer(RayPPOTrainer):
         self.teacher_system_prompt = opd_cfg.get("teacher_system_prompt", None)
         self.teacher_sync_freq = opd_cfg.get("teacher_sync_freq", 0)
         self.teacher_ema_decay = opd_cfg.get("teacher_ema_decay", 0.0)
+        self.single_model_mode = (self.teacher_sync_freq == 1 and self.teacher_ema_decay == 0.0)
 
         # Rollout PI config (SDPO-style)
         pi_rollout = opd_cfg.get("pi_rollout", {})
@@ -455,11 +456,8 @@ class OPDTrainer(RayPPOTrainer):
                     )
 
                 if opd_batch is not None:
-                                   opd_batch.batch["student_input_ids"].shape[0],
-                                   list(opd_batch.batch.keys()))
                     opd_batch = self._pad_opd_batch_for_dispatch(opd_batch)
-                                   opd_batch.batch["student_input_ids"].shape[0],
-                                   opd_batch.batch["student_input_ids"].shape[1])
+                    opd_batch.meta_info["single_model_mode"] = self.single_model_mode
                     opd_batch.meta_info["opd_loss_type"] = self.loss_type
                     opd_batch.meta_info["opd_beta"] = self.beta
                     opd_batch.meta_info["opd_chunk_size"] = self.chunk_size
@@ -480,8 +478,8 @@ class OPDTrainer(RayPPOTrainer):
 
                 metrics["timing/train_s"] = time.time() - train_t0
 
-                # EMA teacher sync (OPSD mode)
-                if self.teacher_sync_freq > 0 and self.global_steps % self.teacher_sync_freq == 0:
+                # EMA teacher sync (OPSD mode) — skip in single_model_mode (teacher IS actor)
+                if not self.single_model_mode and self.teacher_sync_freq > 0 and self.global_steps % self.teacher_sync_freq == 0:
                     sync_data = DataProto(meta_info={"ema_decay": self.teacher_ema_decay})
                     self.actor_rollout_wg.sync_ref_from_actor(sync_data)
 
