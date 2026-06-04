@@ -455,11 +455,9 @@ class OPDTrainer(RayPPOTrainer):
                     )
 
                 if opd_batch is not None:
-                    py_logger.info("[OPD-DISPATCH] opd_batch before pad: n_samples=%d, keys=%s",
                                    opd_batch.batch["student_input_ids"].shape[0],
                                    list(opd_batch.batch.keys()))
                     opd_batch = self._pad_opd_batch_for_dispatch(opd_batch)
-                    py_logger.info("[OPD-DISPATCH] opd_batch after pad: n_samples=%d, seq_len=%d",
                                    opd_batch.batch["student_input_ids"].shape[0],
                                    opd_batch.batch["student_input_ids"].shape[1])
                     opd_batch.meta_info["opd_loss_type"] = self.loss_type
@@ -478,7 +476,6 @@ class OPDTrainer(RayPPOTrainer):
                     opd_metrics = reduce_metrics(opd_output.meta_info["metrics"])
                     metrics.update(opd_metrics)
                 else:
-                    py_logger.info("[OPD-DISPATCH] opd_batch is None, skipping update_opd")
                     metrics["opd/skipped"] = 1.0
 
                 metrics["timing/train_s"] = time.time() - train_t0
