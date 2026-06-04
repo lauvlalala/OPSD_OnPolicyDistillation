@@ -10,9 +10,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SRC_ROOT="${REPO_ROOT}/src"
 
+# Source environment variables (.env is .gitignored)
+if [ -f "${REPO_ROOT}/.env" ]; then
+    source "${REPO_ROOT}/.env"
+fi
+
 export PYTHONPATH="${SRC_ROOT}:$PYTHONPATH"
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export MASTER_PORT=${MASTER_PORT:-$(shuf -i 29500-39999 -n 1)}
+
+# Ensure no stale Ray cluster is connected
+ray stop --force 2>/dev/null || true
 
 # ============================================================================
 # Configuration
@@ -98,6 +106,7 @@ python3 -m opd.main_opd \
     data.max_prompt_length=$max_prompt_length \
     data.max_response_length=$max_response_length \
     data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts_workers=8 \
     data.truncation=left \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -130,8 +139,8 @@ python3 -m opd.main_opd \
     opd.pi_mode=template \
     opd.teacher_sync_freq=${teacher_sync_freq} \
     opd.teacher_ema_decay=${teacher_ema_decay} \
-    reward.custom_reward_function.path="${SRC_ROOT}/rewards/math_reward.py" \
-    reward.custom_reward_function.name=compute_score \
+    custom_reward_function.path="${SRC_ROOT}/rewards/math_reward.py" \
+    custom_reward_function.name=compute_score \
     trainer.logger='["console"]' \
     trainer.experiment_name=$EXP_NAME \
     trainer.n_gpus_per_node=$GPUS_PER_NODE \

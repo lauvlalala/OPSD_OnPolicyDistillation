@@ -106,6 +106,7 @@ python3 -m opd.main_opd \
     data.max_prompt_length=$max_prompt_length \
     data.max_response_length=$max_response_length \
     data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts_workers=8 \
     data.truncation=left \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \

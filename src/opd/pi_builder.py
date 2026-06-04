@@ -191,6 +191,7 @@ def build_pi_batch(
     student_seqs = []
     teacher_seqs = []
     kept_indices = []
+    has_pi_mask = []
     skipped = 0
 
     raw_prompts = batch.non_tensor_batch.get("raw_prompt", [None] * len(batch))
@@ -203,55 +204,57 @@ def build_pi_batch(
             skipped += 1
             continue
 
+        # Tokenize student prompt (original) — needed for both PI and non-PI cases
+        student_messages = raw_prompts[i] if (i < len(raw_prompts) and raw_prompts[i] is not None) else []
+        if not (isinstance(student_messages, list) and student_messages):
+            skipped += 1
+            continue
+
+        student_prompt_ids = tokenizer.apply_chat_template(
+            student_messages, add_generation_prompt=True, tokenize=True, **chat_kwargs,
+        )
+        s_seq = _build_sequence_from_token_ids(student_prompt_ids, valid_response_ids, max_length, pad_token_id)
+        if s_seq is None:
+            skipped += 1
+            continue
+
         # Build teacher content via PI
         teacher_content = build_pi_teacher_content(
             idx=i, batch=batch, responses_text=responses_text,
             rewards=rewards, success_by_uid=success_by_uid,
             feedbacks=feedbacks, pi_config=pi_config,
         )
-        if teacher_content is None:
-            skipped += 1
-            continue
 
-        # Tokenize teacher prompt
-        teacher_messages = []
-        # Preserve system messages from original prompt
-        if i < len(raw_prompts) and raw_prompts[i] is not None:
-            orig_msgs = raw_prompts[i] if isinstance(raw_prompts[i], list) else []
-            for msg in orig_msgs:
-                if isinstance(msg, dict) and msg.get("role") == "system":
-                    teacher_messages.append(msg)
-        teacher_messages.append({"role": "user", "content": teacher_content})
+        has_pi = teacher_content is not None
+        if has_pi:
+            # Tokenize teacher prompt with PI
+            teacher_messages = []
+            if i < len(raw_prompts) and raw_prompts[i] is not None:
+                orig_msgs = raw_prompts[i] if isinstance(raw_prompts[i], list) else []
+                for msg in orig_msgs:
+                    if isinstance(msg, dict) and msg.get("role") == "system":
+                        teacher_messages.append(msg)
+            teacher_messages.append({"role": "user", "content": teacher_content})
 
-        teacher_prompt_ids = tokenizer.apply_chat_template(
-            teacher_messages, add_generation_prompt=True, tokenize=True, **chat_kwargs,
-        )
-        t_seq = _build_sequence_from_token_ids(teacher_prompt_ids, valid_response_ids, max_length, pad_token_id)
-        if t_seq is None:
-            skipped += 1
-            continue
-
-        # Tokenize student prompt (original)
-        student_messages = raw_prompts[i] if (i < len(raw_prompts) and raw_prompts[i] is not None) else []
-        if isinstance(student_messages, list) and student_messages:
-            student_prompt_ids = tokenizer.apply_chat_template(
-                student_messages, add_generation_prompt=True, tokenize=True, **chat_kwargs,
+            teacher_prompt_ids = tokenizer.apply_chat_template(
+                teacher_messages, add_generation_prompt=True, tokenize=True, **chat_kwargs,
             )
-        else:
-            skipped += 1
-            continue
+            t_seq = _build_sequence_from_token_ids(teacher_prompt_ids, valid_response_ids, max_length, pad_token_id)
+            if t_seq is None:
+                # PI too long, fall through to no-PI path
+                has_pi = False
 
-        s_seq = _build_sequence_from_token_ids(student_prompt_ids, valid_response_ids, max_length, pad_token_id)
-        if s_seq is None:
-            skipped += 1
-            continue
+        if not has_pi:
+            # No PI: use student prompt as teacher prompt, keep loss_mask matching
+            t_seq = {k: v.clone() for k, v in s_seq.items()}
 
         teacher_seqs.append(t_seq)
         student_seqs.append(s_seq)
         kept_indices.append(i)
+        has_pi_mask.append(has_pi)
 
     if skipped:
-        logger.info("PI builder: skipped %d samples (no PI or empty response), kept %d", skipped, len(kept_indices))
+        logger.info("PI builder: skipped %d samples (empty response/prompt), kept %d", skipped, len(kept_indices))
 
     if not teacher_seqs:
         return None
@@ -262,5 +265,9 @@ def build_pi_batch(
         for key in ("input_ids", "attention_mask", "position_ids", "loss_mask"):
             batch_dict[f"{prefix}{key}"] = torch.stack([s[key] for s in seqs])
     batch_dict["valid_row_mask"] = torch.ones(len(student_seqs), dtype=torch.bool)
+    # distillation_mask: per-sample weight (1.0 = has PI, 0.0 = no PI → loss zeroed)
+    batch_dict["sample_weights"] = torch.tensor(
+        [1.0 if m else 0.0 for m in has_pi_mask], dtype=torch.float32
+    )
 
     return DataProto.from_single_dict(batch_dict)

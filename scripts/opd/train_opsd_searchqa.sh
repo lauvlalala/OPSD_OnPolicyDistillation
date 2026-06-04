@@ -67,6 +67,7 @@ python3 -m opd.main_opd \
     data.max_prompt_length=$max_prompt_length \
     data.max_response_length=$max_response_length \
     data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts_workers=8 \
     data.truncation=left \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -95,8 +96,8 @@ python3 -m opd.main_opd \
     opd.pi_mode=rollout \
     opd.teacher_sync_freq=${teacher_sync_freq} \
     opd.teacher_ema_decay=${teacher_ema_decay} \
-    reward.custom_reward_function.path="${SRC_ROOT}/rewards/searchqa.py" \
-    reward.custom_reward_function.name=compute_score \
+    custom_reward_function.path="${SRC_ROOT}/rewards/searchqa_reward.py" \
+    custom_reward_function.name=compute_score \
     trainer.logger='["console"]' \
     trainer.experiment_name=$EXP_NAME \
     trainer.n_gpus_per_node=$GPUS_PER_NODE \

@@ -13,6 +13,7 @@ Training step:
 
 import logging
 import math
+import os
 
 import torch
 import torch.nn.functional as F
@@ -166,10 +167,16 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         device = get_device_id()
 
         batch_size = data.batch["student_input_ids"].shape[0]
+        print(f"[OPD-DEBUG] update_opd entered: batch_size={batch_size}, "
+              f"teacher_shape={list(data.batch['teacher_input_ids'].shape)}, "
+              f"student_shape={list(data.batch['student_input_ids'].shape)}, "
+              f"has_sample_weights={'sample_weights' in data.batch}", flush=True)
         if batch_size == 0:
             return DataProto(meta_info={"metrics": {"opd/loss": 0.0, "opd/num_tokens": 0}})
 
         micro_batches = list(data.split(micro_batch_size))
+        print(f"[OPD-DEBUG] micro_batches={len(micro_batches)}, micro_batch_size={micro_batch_size}, "
+              f"ref_needs_offload={ref_needs_offload}", flush=True)
         logger.info("[OPD-MEM] batch_size=%d, micro_batches=%d, micro_batch_size=%d, ref_needs_offload=%s",
                      batch_size, len(micro_batches), micro_batch_size, ref_needs_offload)
         _mem("before-ulysses")
@@ -179,42 +186,37 @@ class OPDWorker(AsyncActorRolloutRefWorker):
             # Phase 1: Teacher forward — only ref model on GPU
             # ------------------------------------------------------------------
             _mem("phase1-before-ref-load")
+            print(f"[OPD-DEBUG] rank={os.environ.get('RANK','?')} BEFORE load_fsdp_model_to_gpu(ref)", flush=True)
             if hasattr(self, "ref_module_fsdp") and self.ref_module_fsdp is not None and ref_needs_offload:
                 load_fsdp_model_to_gpu(self.ref_module_fsdp)
+            print(f"[OPD-DEBUG] rank={os.environ.get('RANK','?')} AFTER load_fsdp_model_to_gpu(ref)", flush=True)
             _mem("phase1-after-ref-load")
 
             self.ref_module_fsdp.eval()
             forward_fn = self._forward_logits_unpadded if use_remove_padding else self._forward_logits_padded
             teacher_logits_cache = []  # list of (teacher_logits_cpu, is_valid)
+            print(f"[OPD-DEBUG] Phase 1 start: ref_module loaded, forward_fn={'unpadded' if use_remove_padding else 'padded'}", flush=True)
 
             for i, micro_batch in enumerate(micro_batches):
                 micro_batch = micro_batch.to(device)
-                valid_row_mask = micro_batch.batch.get("valid_row_mask")
-                if valid_row_mask is not None:
-                    valid_row_mask = valid_row_mask.bool()
-                    if not valid_row_mask.any():
-                        teacher_logits_cache.append((None, False))
-                        continue
-
                 t_input_ids = micro_batch.batch["teacher_input_ids"]
                 t_attention_mask = micro_batch.batch["teacher_attention_mask"]
                 t_position_ids = micro_batch.batch["teacher_position_ids"]
                 t_loss_mask = micro_batch.batch["teacher_loss_mask"]
 
-                if valid_row_mask is not None:
-                    t_input_ids = t_input_ids[valid_row_mask]
-                    t_attention_mask = t_attention_mask[valid_row_mask]
-                    t_position_ids = t_position_ids[valid_row_mask]
-                    t_loss_mask = t_loss_mask[valid_row_mask]
-
+                print(f"[OPD-DEBUG] phase1 mb[{i}]: t_ids={list(t_input_ids.shape)}, "
+                      f"response_tokens={int(t_loss_mask[:, 1:].sum().item())}", flush=True)
                 logger.info("[OPD-MEM] phase1 micro_batch[%d]: teacher_ids shape=%s, loss_mask response_tokens=%d",
                             i, list(t_input_ids.shape), int(t_loss_mask[:, 1:].sum().item()))
                 _mem(f"phase1-mb{i}-before-teacher-fwd")
 
+                rank = os.environ.get("RANK", "?")
+                print(f"[OPD-DEBUG] rank={rank} phase1 mb[{i}] BEFORE forward_fn", flush=True)
                 with torch.no_grad():
                     teacher_logits = forward_fn(
                         self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids, t_loss_mask
                     )
+                print(f"[OPD-DEBUG] rank={rank} phase1 mb[{i}] AFTER forward_fn, logits={list(teacher_logits.shape)}", flush=True)
                 logger.info("[OPD-MEM] phase1 micro_batch[%d]: teacher_logits shape=%s",
                             i, list(teacher_logits.shape))
                 _mem(f"phase1-mb{i}-after-teacher-fwd")
@@ -346,20 +348,10 @@ class OPDWorker(AsyncActorRolloutRefWorker):
 
             micro_batch = micro_batch.to(device)
 
-            valid_row_mask = micro_batch.batch.get("valid_row_mask")
-            if valid_row_mask is not None:
-                valid_row_mask = valid_row_mask.bool()
-
             s_input_ids = micro_batch.batch["student_input_ids"]
             s_attention_mask = micro_batch.batch["student_attention_mask"]
             s_position_ids = micro_batch.batch["student_position_ids"]
             s_loss_mask = micro_batch.batch["student_loss_mask"]
-
-            if valid_row_mask is not None:
-                s_input_ids = s_input_ids[valid_row_mask]
-                s_attention_mask = s_attention_mask[valid_row_mask]
-                s_position_ids = s_position_ids[valid_row_mask]
-                s_loss_mask = s_loss_mask[valid_row_mask]
 
             _mem2(f"phase2-mb{i}-before-teacher-to-gpu")
 
@@ -442,10 +434,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 # Per-sample reward weighting
                 mb_sample_weights = None
                 if use_sample_weights and "sample_weights" in micro_batch.batch:
-                    mb_sample_weights = micro_batch.batch["sample_weights"]
-                    if valid_row_mask is not None:
-                        mb_sample_weights = mb_sample_weights[valid_row_mask]
-                    mb_sample_weights = mb_sample_weights.to(device)
+                    mb_sample_weights = micro_batch.batch["sample_weights"].to(device)
 
                 # Resolve loss function and kwargs
                 loss_kwargs = {"chunk_size": chunk_size, "temperature": temperature, "token_clip": token_clip}
@@ -459,8 +448,9 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                     token_offset = 0
                     for si in range(per_sample_token_counts.shape[0]):
                         n_tok = per_sample_token_counts[si].item()
-                        if n_tok == 0:
-                            sample_losses.append(torch.tensor(0.0, device=device))
+                        if n_tok == 0 or mb_sample_weights[si].item() == 0.0:
+                            sample_losses.append(torch.zeros(1, device=device, requires_grad=True).squeeze())
+                            token_offset += n_tok
                             continue
                         t_slice = teacher_logits[token_offset:token_offset + n_tok]
                         s_slice = student_logits[token_offset:token_offset + n_tok]
@@ -468,7 +458,8 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                         sample_losses.append(sl)
                         token_offset += n_tok
                     sample_losses = torch.stack(sample_losses)
-                    loss = (sample_losses * mb_sample_weights).sum() / mb_sample_weights.sum()
+                    weight_sum = mb_sample_weights.sum()
+                    loss = (sample_losses * mb_sample_weights).sum() / weight_sum.clamp(min=1e-8)
                     n_tokens = int(per_sample_token_counts.sum().item())
                 else:
                     loss, n_tokens = _loss_fn(teacher_logits, student_logits, **loss_kwargs)
