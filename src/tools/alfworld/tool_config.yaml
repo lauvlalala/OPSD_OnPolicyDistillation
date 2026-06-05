@@ -2,7 +2,7 @@ tools:
   - class_name: tools.alfworld.tool.AlfWorldTool
     config:
       max_steps: 50
-      data_path: ${oc.env:ALFWORLD_DATA,}
+      data_path: ${oc.env:ALFWORLD_DATA,/data_train_v2/eoncanyang/alfworld_data}
       type: native
     tool_schema:
       type: function

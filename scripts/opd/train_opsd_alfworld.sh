@@ -14,6 +14,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SRC_ROOT="${REPO_ROOT}/src"
 
+# Source environment variables (.env is .gitignored)
+if [ -f "${REPO_ROOT}/.env" ]; then
+    source "${REPO_ROOT}/.env"
+fi
+
 export PYTHONPATH="${SRC_ROOT}:$PYTHONPATH"
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export MASTER_PORT=${MASTER_PORT:-$(shuf -i 29500-39999 -n 1)}
@@ -102,7 +107,7 @@ python3 -m opd.main_opd \
     opd.loss_type=${opd_loss_type} \
     opd.chunk_size=${opd_chunk_size} \
     opd.token_scope=${opd_token_scope} \
-    opd.pi_mode=rollout \
+    opd.pi_mode=rollout+feedback \
     opd.teacher_sync_freq=${teacher_sync_freq} \
     opd.teacher_ema_decay=${teacher_ema_decay} \
     custom_reward_function.path="${SRC_ROOT}/rewards/alfworld_reward.py" \

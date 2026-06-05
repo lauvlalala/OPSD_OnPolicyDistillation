@@ -27,6 +27,7 @@ class AlfWorldTool(BaseTool):
         self._instances: dict[str, dict] = {}
         self.max_steps = config.get("max_steps", 50)
         self.data_path = config.get("data_path", os.environ.get("ALFWORLD_DATA", ""))
+        self._env_config = None
 
     async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:
         """Create a new ALFWorld environment instance."""
@@ -34,15 +35,21 @@ class AlfWorldTool(BaseTool):
             instance_id = str(uuid4())
 
         try:
-            import alfworld.agents.environment as environment
             from alfworld.agents.environment.alfred_tw_env import AlfredTWEnv
         except ImportError:
             msg = "alfworld not installed. Run: pip install alfworld"
             self._instances[instance_id] = {"env": None, "done": True, "reward": 0.0, "steps": 0}
             return instance_id, ToolResponse(text=msg)
 
+        # Load config once
+        if self._env_config is None:
+            import yaml
+            config_path = os.path.join(self.data_path, "base_config.yaml")
+            with open(config_path) as f:
+                self._env_config = yaml.safe_load(f)
+
         # Initialize environment
-        env = AlfredTWEnv(self.data_path)
+        env = AlfredTWEnv(self._env_config, train_eval="train")
         obs, info = env.reset()
         initial_obs = obs[0] if isinstance(obs, list) else str(obs)
 
