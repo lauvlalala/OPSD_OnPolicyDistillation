@@ -31,13 +31,17 @@ class SWEBashTool(BaseTool):
         self.max_output_length = config.get("max_output_length", MAX_OUTPUT_LENGTH)
         self.timeout = config.get("timeout", 120)  # seconds per command
         self.workdir = config.get("workdir", "/testbed")  # SWE-bench default
+        self.docker_host = config.get("docker_host", None)  # e.g. "ssh://user@host" or "tcp://host:2375"
         self._docker_client = None
 
     def _get_docker_client(self):
         """Lazy import and create docker client (cached)."""
         if self._docker_client is None:
             import docker
-            self._docker_client = docker.from_env()
+            if self.docker_host:
+                self._docker_client = docker.DockerClient(base_url=self.docker_host)
+            else:
+                self._docker_client = docker.from_env()
         return self._docker_client
 
     async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:

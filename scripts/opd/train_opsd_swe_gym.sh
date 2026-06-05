@@ -15,6 +15,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SRC_ROOT="${REPO_ROOT}/src"
 
+# Source environment variables (.env is .gitignored)
+if [ -f "${REPO_ROOT}/.env" ]; then
+    source "${REPO_ROOT}/.env"
+fi
+
 export PYTHONPATH="${SRC_ROOT}:$PYTHONPATH"
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export MASTER_PORT=${MASTER_PORT:-$(shuf -i 29500-39999 -n 1)}

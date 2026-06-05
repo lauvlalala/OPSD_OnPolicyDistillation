@@ -5,6 +5,7 @@ tools:
       timeout: 120
       workdir: /testbed
       type: native
+      # docker_host: ssh://user@docker-host  # set to use remote Docker daemon
     tool_schema:
       type: function
       function:

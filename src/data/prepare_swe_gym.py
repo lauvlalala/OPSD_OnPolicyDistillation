@@ -30,6 +30,11 @@ SWE_SYSTEM_PROMPT = (
 DOCKER_IMAGE_PREFIX = "xingyaoww/sweb.eval.x86_64."
 
 
+def instance_id_to_docker_image(instance_id: str) -> str:
+    """Convert instance_id to Docker image name (lowercase, __ -> _s_)."""
+    return f"{DOCKER_IMAGE_PREFIX}{instance_id.replace('__', '_s_').lower()}"
+
+
 def process_swe_gym_lite(seed: int = 42):
     """Load and process SWE-Gym Lite dataset."""
     print("Loading SWE-Gym-Lite from HuggingFace...")
@@ -46,8 +51,7 @@ def process_swe_gym_lite(seed: int = 42):
         if not instance_id or not problem_statement:
             continue
 
-        # Docker image name follows SWE-bench convention
-        docker_image = f"{DOCKER_IMAGE_PREFIX}{instance_id}"
+        docker_image = instance_id_to_docker_image(instance_id)
 
         # Build test command from test_patch or use default
         test_cmd = example.get("test_cmd", "")
