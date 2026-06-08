@@ -3,18 +3,55 @@ Reward function for WebShop: task score from environment.
 
 WebShop returns a reward between 0 and 1 based on how well the
 purchased item matches the user's instruction.
+This function also extracts feedback from the trajectory for PI building.
 """
+
+import re
+
+
+def _extract_feedback(trajectory: str) -> str:
+    """Extract failure feedback from WebShop trajectory.
+
+    Summarizes what the agent did wrong — e.g. never searched, didn't buy,
+    bought wrong item, etc.
+    """
+    if not trajectory:
+        return ""
+
+    has_search = "search[" in trajectory.lower()
+    has_click = "click[" in trajectory.lower()
+    has_buy = "click[buy now]" in trajectory.lower()
+
+    parts = []
+    if not has_search:
+        parts.append("Agent never performed a search.")
+    if not has_click:
+        parts.append("Agent never clicked on any product.")
+    elif not has_buy:
+        parts.append("Agent browsed products but never clicked 'Buy Now'.")
+
+    # Extract the last few actions for context
+    actions = re.findall(r'(?:search|click)\[([^\]]*)\]', trajectory, re.IGNORECASE)
+    if actions:
+        last_actions = actions[-3:] if len(actions) >= 3 else actions
+        parts.append("Last actions: " + " → ".join(last_actions))
+
+    return " ".join(parts) if parts else ""
 
 
 def compute_score(solution_str: str, ground_truth: str, **kwargs) -> dict:
     """Compute reward for WebShop.
 
     In multi-turn mode, the actual reward comes from WebShopTool.calc_reward().
-    This is a fallback for offline evaluation.
+    This function extracts feedback from the trajectory for PI.
     """
     try:
         score = float(ground_truth) if ground_truth else 0.0
     except (ValueError, TypeError):
         score = 0.0
 
-    return {"score": score, "acc": 1.0 if score >= 1.0 else 0.0, "pred": "", "feedback": ""}
+    feedback = ""
+    if score < 1.0 and solution_str:
+        feedback = _extract_feedback(solution_str)
+
+    return {"score": score, "acc": 1.0 if score >= 1.0 else 0.0, "pred": "", "feedback": feedback}

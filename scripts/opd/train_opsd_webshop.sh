@@ -14,7 +14,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SRC_ROOT="${REPO_ROOT}/src"
 
-export PYTHONPATH="${SRC_ROOT}:$PYTHONPATH"
+# Source environment variables (.env is .gitignored)
+if [ -f "${REPO_ROOT}/.env" ]; then
+    source "${REPO_ROOT}/.env"
+fi
+
+export PYTHONPATH="${WEBSHOP_PATH}:${SRC_ROOT}:$PYTHONPATH"
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export MASTER_PORT=${MASTER_PORT:-$(shuf -i 29500-39999 -n 1)}
 
@@ -85,8 +90,8 @@ python3 -m opd.main_opd \
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$ppo_micro_batch_size_per_gpu \
     actor_rollout_ref.actor.grad_clip=1.0 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${PARAM_OFFLOAD:-False} \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OPTIMIZER_OFFLOAD:-False} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$tp_size \
     actor_rollout_ref.rollout.name=sglang \
@@ -102,7 +107,7 @@ python3 -m opd.main_opd \
     opd.loss_type=${opd_loss_type} \
     opd.chunk_size=${opd_chunk_size} \
     opd.token_scope=${opd_token_scope} \
-    opd.pi_mode=rollout \
+    opd.pi_mode=rollout+feedback \
     opd.teacher_sync_freq=${teacher_sync_freq} \
     opd.teacher_ema_decay=${teacher_ema_decay} \
     custom_reward_function.path="${SRC_ROOT}/rewards/webshop_reward.py" \
