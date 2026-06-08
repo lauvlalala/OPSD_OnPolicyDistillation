@@ -65,7 +65,7 @@ src/
   data/           # 数据准备脚本
   opd/            # 核心 OPD 模块（训练器、worker、损失函数）
   rewards/        # 奖励函数（数学、代码、Agent 等）
-  tools/          # Agent 工具集成（搜索、ALFWorld、WebShop、SWE）
+  tools/          # Agent 工具集成（ALFWorld、WebShop、SWE）
 ```
 
 ## 支持的任务
@@ -76,7 +76,6 @@ src/
 | OpenThoughts | 数学推理 | `train_opsd_openthoughts.sh` |
 | LiveCodeBench | 代码生成 | `train_opsd_livecodebench.sh` |
 | SciKnowEval | 科学问答 | `train_opsd_sciknoweval.sh` |
-| SearchQA | 搜索检索 | `train_opsd_searchqa.sh` |
 | ToolUse | 工具调用 | `train_opsd_tooluse.sh` |
 | ALFWorld | 交互式 Agent | `train_opsd_alfworld.sh` |
 | WebShop | 网购 Agent | `train_opsd_webshop.sh` |
