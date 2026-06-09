@@ -52,6 +52,19 @@ numpy==1.26.4
 pandas==2.3.3
 cachetools==7.1.4
 
+# Agent Environments
+docker==7.1.0
+paramiko==5.0.0
+alfworld==0.4.2
+gym==0.24.0
+beautifulsoup4==4.14.3
+thefuzz==0.22.1
+rank_bm25==0.2.2
+cleantext==1.1.4
+selenium==4.44.0
+spacy==3.8.14
+gdown==6.1.0
+
 # NVIDIA libraries (pinned to CUDA 12.8 for PyTorch 2.8.0)
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
